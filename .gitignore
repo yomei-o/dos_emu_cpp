@@ -1,0 +1,9 @@
+dosemu
+dosemu.exe
+build_msvc/
+*.obj
+*.o
+*.log
+lsic/
+*.com
+tests/*.exe
