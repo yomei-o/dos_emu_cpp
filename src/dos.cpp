@@ -7,7 +7,7 @@
 
 namespace dosemu {
 
-bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&);
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&);
 
 void Dos::terminate(int code) {
     if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
@@ -44,7 +44,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
 
     std::string err;
-    if (!load_program(file, cpu_, child_psp, tail, err)) {
+    if (!load_program(file, cpu_, child_psp, tail, err, name)) {
         for (int i = 0; i < 8; ++i) cpu_.r[i] = sr[i];
         for (int i = 0; i < 4; ++i) cpu_.sreg[i] = ss[i];
         cpu_.ip = sip; cpu_.flags = sfl; psp_seg = spsp; heap_next_ = sheap;
@@ -87,12 +87,35 @@ bool Dos::int21() {
     uint8_t ah = cpu_.r[AX] >> 8;
     switch (ah) {
         case 0x00: terminate(0); return true;                       // terminate
+        case 0x01: {                                                // read char from stdin, with echo -> AL
+            int c = getch(); if (c < 0) c = 0x1A;                    // Ctrl-Z at EOF
+            out(1, static_cast<char>(c)); cpu_.sb(AX, static_cast<uint8_t>(c)); return true;
+        }
         case 0x02: out(1, cpu_.r[DX] & 0xFF); return true;          // output char in DL
+        case 0x07:                                                  // read char, no echo, no Ctrl-C check
+        case 0x08: {                                                // read char, no echo
+            int c = getch(); cpu_.sb(AX, static_cast<uint8_t>(c < 0 ? 0x1A : c)); return true;
+        }
+        case 0x0A: {                                                // buffered line input at DS:DX
+            uint16_t seg = cpu_.sreg[DS], off = cpu_.r[DX];
+            uint8_t maxlen = mem_.rb(seg, off);
+            uint8_t len = 0;
+            for (;;) {
+                int c = getch();
+                if (c < 0 || c == '\r') { out(1, '\r'); out(1, '\n'); break; }
+                if (c == 0x08) { if (len) { --len; out(1, '\b'); out(1, ' '); out(1, '\b'); } continue; }  // backspace
+                if (len + 1 >= maxlen) continue;
+                mem_.wb(seg, off + 2 + len, static_cast<uint8_t>(c)); ++len; out(1, static_cast<char>(c));
+            }
+            mem_.wb(seg, off + 2 + len, 0x0D);
+            mem_.wb(seg, off + 1, len);
+            return true;
+        }
         case 0x04: return true;                                     // output to aux — ignore
         case 0x05: return true;                                     // output to printer — ignore
         case 0x06:                                                  // direct console I/O
             if ((cpu_.r[DX] & 0xFF) != 0xFF) { out(1, cpu_.r[DX] & 0xFF); }
-            else { cpu_.sb(AX, 0); cpu_.flags |= ZF; }              // no input available
+            else { int c = getch(); if (c < 0) { cpu_.sb(AX, 0); cpu_.flags |= ZF; } else { cpu_.sb(AX, (uint8_t)c); cpu_.flags &= ~ZF; } }
             return true;
         case 0x09: {                                                // output '$'-terminated string at DS:DX
             uint16_t seg = cpu_.sreg[DS], off = cpu_.r[DX];
@@ -106,6 +129,25 @@ bool Dos::int21() {
         }
         case 0x0B: cpu_.sb(AX, 0); return true;                     // check input status: none
         case 0x0C: return true;                                     // flush + input — ignore
+        case 0x0E: cpu_.sb(AX, 3); return true;                     // select drive -> report 3 drives
+        case 0x19: cpu_.sb(AX, 0); return true;                     // get current drive -> A:
+        case 0x47: {                                                // get current directory (DL drive) -> DS:SI (root)
+            mem_.wb(cpu_.sreg[DS], cpu_.r[SI], 0);                   // empty = root
+            cpu_.sb(AX, 0); cpu_.flags &= ~CF; return true;
+        }
+        case 0x58:                                                  // get/set allocation strategy / UMB link
+            switch (cpu_.r[AX] & 0xFF) {
+                case 0: cpu_.r[AX] = 0; break;        // get strategy -> first fit
+                case 2: cpu_.r[AX] = 0; break;        // get UMB link -> not linked
+                default: break;                       // set strategy / set UMB link: accept
+            }
+            cpu_.flags &= ~CF; return true;
+        case 0x65:                                                  // get extended country info -> minimal, ok
+            cpu_.flags &= ~CF; return true;
+        case 0x71:                                                  // Windows long-filename API: not supported
+            cpu_.r[AX] = 0x7100; cpu_.flags |= CF; return true;     // the standard "no LFN" answer
+        case 0x33: cpu_.sb(DX, 0); cpu_.flags &= ~CF; return true;  // get/set Ctrl-Break flag -> off
+        case 0x3B: cpu_.flags &= ~CF; return true;                  // chdir -> accept (single flat root)
         case 0x25: {                                                // set interrupt vector (AL=n) DS:DX
             uint8_t v = cpu_.r[AX] & 0xFF;
             mem_.w16(v * 4, cpu_.r[DX]);
@@ -122,6 +164,13 @@ bool Dos::int21() {
             cpu_.sreg[ES] = mem_.r16(v * 4 + 2);
             return true;
         }
+        case 0x37:                                                  // get/set switch character
+            if ((cpu_.r[AX] & 0xFF) == 0) { cpu_.sb(AX, 0); cpu_.r[DX] = (cpu_.r[DX] & 0xFF00) | '/'; }
+            else cpu_.sb(AX, 0);
+            return true;
+        case 0x52:                                                  // get list of lists (SysVars) -> ES:BX
+            cpu_.sreg[ES] = 0x0090; cpu_.r[BX] = 0x0000;            // a zeroed scratch area
+            return true;
         case 0x29: {                                                // parse filename (DS:SI) into an FCB (ES:DI)
             uint16_t sseg = cpu_.sreg[DS], si = cpu_.r[SI];
             uint16_t eseg = cpu_.sreg[ES], di = cpu_.r[DI];
@@ -143,6 +192,7 @@ bool Dos::int21() {
         }
         case 0x2A:                                                  // get date -> CX=year DH=month DL=day AL=dow
             cpu_.r[CX] = 1993; cpu_.r[DX] = (8 << 8) | 19; cpu_.sb(AX, 4); return true;
+        case 0x2B: cpu_.sb(AX, 0); cpu_.flags &= ~CF; return true;      // set date -> accept
         case 0x2C:                                                  // get time -> CH=hr CL=min DH=sec DL=1/100
             cpu_.r[CX] = (12 << 8) | 0; cpu_.r[DX] = 0; return true;
         case 0x43: {                                                // get/set file attributes (AL=0 get, 1 set)

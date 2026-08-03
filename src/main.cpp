@@ -4,12 +4,13 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <cctype>
 #include "cpu.h"
 #include "dos.h"
 #include "memory.h"
 
 namespace dosemu {
-bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&);
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&);
 }
 
 static std::vector<uint8_t> read_file(const char* path) {
@@ -41,10 +42,17 @@ int main(int argc, char** argv) {
     Dos dos(cpu, mem, root);
     dos.output = [](int fd, const char* data, size_t len) {
         std::fwrite(data, 1, len, fd == 2 ? stderr : stdout);
+        std::fflush(fd == 2 ? stderr : stdout);
     };
+    dos.input = []() { int c = std::getchar(); return c == EOF ? -1 : c; };
+
+    // The program's DOS path: A:\ + its base name (a shell reads this to find itself).
+    std::string base = argv[a]; { auto s = base.find_last_of("/\\"); if (s != std::string::npos) base = base.substr(s + 1); }
+    for (char& c : base) c = static_cast<char>(std::toupper((unsigned char)c));
+    std::string dos_name = "A:\\" + base;
 
     std::string err;
-    if (!load_program(file, cpu, 0x0100, cmdline, err)) {
+    if (!load_program(file, cpu, 0x0100, cmdline, err, dos_name)) {
         std::fprintf(stderr, "dosemu: %s\n", err.c_str());
         return 1;
     }

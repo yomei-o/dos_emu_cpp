@@ -7,3 +7,5 @@ build_msvc/
 lsic/
 *.com
 tests/*.exe
+fdos/
+*.zip

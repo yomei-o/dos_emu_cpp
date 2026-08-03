@@ -9,15 +9,16 @@
 
 namespace dosemu {
 
-// A shared environment block (PATH so the compiler driver finds its passes).
+// A shared environment block (PATH so the compiler driver finds its passes, and
+// the program's own full path — which a shell like FreeCOM reads to find itself).
 static constexpr uint16_t kEnvSeg = 0x00F0;
-static void build_env(Memory& mem) {
+static void build_env(Memory& mem, const std::string& dos_name) {
     const char* vars[] = { "PATH=A:\\LSIC86\\BIN", "COMSPEC=A:\\COMMAND.COM", nullptr };
     uint16_t off = 0;
     for (int i = 0; vars[i]; ++i) { for (const char* p = vars[i]; *p; ++p) mem.wb(kEnvSeg, off++, *p); mem.wb(kEnvSeg, off++, 0); }
     mem.wb(kEnvSeg, off++, 0);              // end of strings
     mem.ww(kEnvSeg, off, 1); off += 2;      // count of trailing strings
-    for (const char* p = "A:\\LSIC86\\BIN\\LCC.EXE"; *p; ++p) mem.wb(kEnvSeg, off++, *p);
+    for (char c : dos_name) mem.wb(kEnvSeg, off++, c);
     mem.wb(kEnvSeg, off, 0);
 }
 
@@ -36,11 +37,11 @@ static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline)
 // Loads at psp_seg (0x0100 for the top-level program, higher for EXEC children)
 // and fills the CPU's initial state. Returns true on success.
 bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
-                  const std::string& cmdline, std::string& err) {
+                  const std::string& cmdline, std::string& err, const std::string& dos_name) {
     Memory& mem = cpu.mem();
     uint16_t load_seg = psp_seg + 0x10;   // program starts 256 bytes (one PSP) above
 
-    build_env(mem);
+    build_env(mem, dos_name);
     build_psp(mem, psp_seg, cmdline);
 
     bool is_mz = f.size() >= 2 && f[0] == 'M' && f[1] == 'Z';

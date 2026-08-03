@@ -20,6 +20,9 @@ public:
 
     // Guest output (fd 1/2) goes here; defaults to stdout/stderr.
     std::function<void(int fd, const char* data, size_t len)> output;
+    // Guest input (INT 21h AH=01/07/08/0A). Returns the next byte, or -1 at EOF.
+    // A '\n' is treated as the DOS Enter key ('\r').
+    std::function<int()> input;
 
     uint16_t psp_seg = 0;   // set by the loader
     DosFiles& files() { return files_; }
@@ -51,6 +54,7 @@ private:
     bool exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off);
 
     void out(int fd, char c) { char b = c; if (output) output(fd, &b, 1); }
+    int  getch() { int c = input ? input() : -1; return c == '\n' ? '\r' : c; }   // -1 at EOF
     bool int21();
     bool int21_default(uint8_t n);
     void terminate(int code);
