@@ -84,23 +84,45 @@ static bool wildmatch(const std::string& pat, const std::string& name) {
     return p == pat.size();
 }
 
-bool Dos::find_first(const std::string& spec, uint16_t) {
+// DOS 8.3 match: the name and extension are matched separately, so "*.*" (and a
+// bare "*") match names with no extension too, which a plain glob would not.
+static bool dos83match(const std::string& pat, const std::string& name) {
+    auto split = [](const std::string& s, std::string& nm, std::string& ext) {
+        size_t d = s.find('.');
+        if (d == std::string::npos) { nm = s; ext.clear(); }
+        else { nm = s.substr(0, d); ext = s.substr(d + 1); }
+    };
+    std::string pn, pe, nn, ne;
+    split(pat, pn, pe); split(name, nn, ne);
+    if (pat.find('.') == std::string::npos) pe = "*";   // "FOO" / "*" also match any extension
+    return wildmatch(pn, nn) && wildmatch(pe, ne);
+}
+
+bool Dos::find_first(const std::string& spec, uint16_t attr) {
     find_.clear(); find_pos_ = 0;
     std::string dir = spec, pat = "*";
     size_t s = spec.find_last_of("/\\:");
     if (s != std::string::npos) { pat = spec.substr(s + 1); dir = spec.substr(0, s + 1); }
     else { pat = spec; dir = ""; }
     if (pat.empty()) pat = "*";
+    const uint16_t date = ((1993 - 1980) << 9) | (8 << 5) | 19, time = (12 << 11);
+    bool wantDirs = (attr & 0x10) != 0;
+    // "." and ".." in a real (non-root) subdirectory when directories are requested
+    if (wantDirs && files_.normalize(dir.empty() ? "." : dir) != "\\") {
+        find_.push_back({".", 0, true, date, time});
+        find_.push_back({"..", 0, true, date, time});
+    }
     std::string host = files_.host_path(dir.empty() ? "." : dir);
     std::error_code ec;
     for (auto& e : std::filesystem::directory_iterator(host, ec)) {
-        std::string nm = e.path().filename().string();
-        std::string dosname = nm;
+        bool is_dir = e.is_directory(ec);
+        if (is_dir && !wantDirs) continue;             // dirs only when asked for (attr & 0x10)
+        std::string dosname = e.path().filename().string();
         for (char& c : dosname) c = (char)std::toupper((unsigned char)c);
-        if (!wildmatch(pat, dosname)) continue;
-        Found f; f.name = dosname; f.is_dir = e.is_directory(ec);
-        f.size = f.is_dir ? 0 : (uint32_t)e.file_size(ec);
-        f.date = ((1993 - 1980) << 9) | (8 << 5) | 19; f.time = (12 << 11);
+        if (!dos83match(pat, dosname)) continue;
+        Found f; f.name = dosname; f.is_dir = is_dir;
+        f.size = is_dir ? 0 : (uint32_t)e.file_size(ec);
+        f.date = date; f.time = time;
         find_.push_back(f);
     }
     return !find_.empty();
@@ -216,9 +238,12 @@ bool Dos::int21() {
             return true;
         case 0x69: cpu_.flags &= ~CF; return true;                  // get/set disk serial: accept
         case 0x73: cpu_.flags |= CF; return true;                   // FAT32 free space: unsupported -> use 36h
-        case 0x47: {                                                // get current directory (DL drive) -> DS:SI (root)
-            mem_.wb(cpu_.sreg[DS], cpu_.r[SI], 0);                   // empty = root
-            cpu_.sb(AX, 0); cpu_.flags &= ~CF; return true;
+        case 0x47: {                                                // get current directory (DL drive) -> DS:SI
+            std::string c = files_.cwd();                            // DOS wants it without the leading backslash
+            if (!c.empty() && c[0] == '\\') c = c.substr(1);
+            for (size_t i = 0; i < c.size(); ++i) mem_.wb(cpu_.sreg[DS], cpu_.r[SI] + i, c[i]);
+            mem_.wb(cpu_.sreg[DS], cpu_.r[SI] + c.size(), 0);
+            cpu_.r[AX] = 0x0100; cpu_.flags &= ~CF; return true;
         }
         case 0x38: {                                                // get country info (DS:DX 34-byte buffer)
             uint16_t seg = cpu_.sreg[DS], off = cpu_.r[DX];
@@ -254,7 +279,10 @@ bool Dos::int21() {
         case 0x71:                                                  // Windows long-filename API: not supported
             cpu_.r[AX] = 0x7100; cpu_.flags |= CF; return true;     // the standard "no LFN" answer
         case 0x33: cpu_.sb(DX, 0); cpu_.flags &= ~CF; return true;  // get/set Ctrl-Break flag -> off
-        case 0x3B: cpu_.flags &= ~CF; return true;                  // chdir -> accept (single flat root)
+        case 0x3B:                                                  // chdir (DS:DX)
+            if (files_.chdir(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]))) cpu_.flags &= ~CF;
+            else { cpu_.flags |= CF; cpu_.r[AX] = 3; }
+            return true;
         case 0x25: {                                                // set interrupt vector (AL=n) DS:DX
             uint8_t v = cpu_.r[AX] & 0xFF;
             mem_.w16(v * 4, cpu_.r[DX]);

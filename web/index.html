@@ -94,13 +94,17 @@ int main(void)
     for (const f of dos) { const full='/dos/'+f.name; const sl=full.lastIndexOf('/'); if(sl>0)mkdirp(full.slice(0,sl)); M.FS.writeFile(full, f.bytes); }
     append('dos_emu_cpp — FreeDOS COMMAND.COM ready.\nA:\\LSIC86 has the LSI C-86 compiler on the PATH.\n\n', 'note');
     statusEl.textContent = 'ready — type a command and press Enter.';
+    updatePrompt();
     cmdEl.disabled = false; cmdEl.focus();
   }
+
+  function prompt() { const c = M.ccall('dosemu_cwd', 'string', [], []) || '\\'; return 'A:' + c + '>'; }
+  function updatePrompt() { $('ps').textContent = prompt(); }
 
   function runCommand(line) {
     if (busy || !M) return;
     busy = true; cmdEl.disabled = true;
-    append('A:\\>' + line + '\n', 'cmd');
+    append(prompt() + line + '\n', 'cmd');
     // Save the editor to A:\PROG.C so `lcc prog.c` picks up live edits.
     try { M.FS.writeFile('/dos/PROG.C', $('code').value); } catch {}
     statusEl.textContent = 'running…';
@@ -109,6 +113,7 @@ int main(void)
         M.ccall('dosemu_run', 'number', ['string','string','string'], ['/dos/COMMAND.COM', '/dos', '/C ' + line]);
       } catch (e) { append('\nemu error: ' + e.message + '\n', 'err'); }
       append('\n');
+      updatePrompt();
       statusEl.textContent = 'ready.';
       busy = false; cmdEl.disabled = false; cmdEl.focus();
     }, 20);

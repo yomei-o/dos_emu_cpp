@@ -34,7 +34,13 @@ static std::vector<uint8_t> read_host(const std::string& path) {
     return v;
 }
 
+// The DOS current directory persists across dosemu_run() calls, so a shell prompt
+// driven one command per /C invocation still remembers where 'cd' moved to.
+static std::string g_cwd = "\\";
+
 extern "C" {
+
+const char* dosemu_cwd() { return g_cwd.c_str(); }
 
 // Run a DOS program that lives at prog_host (a MEMFS path), with the DOS drive
 // rooted at `root` and a command tail `cmdtail`. Output is streamed to JS. Returns
@@ -47,6 +53,7 @@ int dosemu_run(const char* prog_host, const char* root, const char* cmdtail) {
     Memory mem;
     Cpu cpu(mem);
     Dos dos(cpu, mem, root);
+    dos.files().set_cwd(g_cwd);
     dos.output = [](int fd, const char* data, size_t len) { js_out(fd, data, static_cast<int>(len)); };
 
     std::string err;
@@ -56,13 +63,16 @@ int dosemu_run(const char* prog_host, const char* root, const char* cmdtail) {
     cpu.max_insns = 2000000000ULL;   // ~ generous for a compile; guards against a runaway freezing the page
     dos.psp_seg = 0x0100;
 
+    int code;
     try {
         cpu.run();
+        code = cpu.exit_code;
     } catch (const CpuError& e) {
         js_log(e.what.c_str());
-        return -1;
+        code = -1;
     }
-    return cpu.exit_code;
+    g_cwd = dos.files().cwd();   // remember any 'cd' for the next command
+    return code;
 }
 
 }  // extern "C"

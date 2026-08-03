@@ -56,6 +56,43 @@ std::string DosFiles::host_path(const std::string& dos_path) {
     return host.string();
 }
 
+std::string DosFiles::normalize(const std::string& in) const {
+    std::string p = in;
+    if (p.size() >= 2 && p[1] == ':') p = p.substr(2);       // drop drive
+    for (char& c : p) if (c == '/') c = '\\';
+    std::vector<std::string> comp;
+    // start from root for an absolute path, else from the current directory
+    std::string start = (!p.empty() && p[0] == '\\') ? std::string("\\") : cwd_;
+    auto split = [&](const std::string& s) {
+        std::string cur;
+        for (size_t i = 0; i <= s.size(); ++i) {
+            if (i == s.size() || s[i] == '\\') { if (!cur.empty()) comp.push_back(cur); cur.clear(); }
+            else cur += s[i];
+        }
+    };
+    split(start); split(p);
+    std::vector<std::string> out;
+    for (auto& c : comp) {
+        if (c == ".") continue;
+        if (c == "..") { if (!out.empty()) out.pop_back(); continue; }
+        out.push_back(c);
+    }
+    std::string r = "\\";
+    for (size_t i = 0; i < out.size(); ++i) { r += out[i]; if (i + 1 < out.size()) r += '\\'; }
+    return r;
+}
+
+bool DosFiles::chdir(const std::string& dir) {
+    std::string norm = normalize(dir);
+    std::string save = cwd_; cwd_ = "\\";       // resolve the normalized (absolute) path from root
+    std::string host = host_path(norm);
+    cwd_ = save;
+    std::error_code ec;
+    if (norm != "\\" && !std::filesystem::is_directory(host, ec)) return false;
+    cwd_ = norm;
+    return true;
+}
+
 int DosFiles::open(const std::string& dos_path, int access) {
     const char* mode = access == 0 ? "rb" : access == 1 ? "r+b" : "r+b";
     std::string hp = host_path(dos_path);

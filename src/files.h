@@ -30,7 +30,12 @@ public:
     // Console handles report themselves so the DOS layer can route to output().
     bool is_console(int handle, int& con_fd) const;
 
-    void set_cwd(const std::string& dos_dir) { cwd_ = dos_dir; }
+    void set_cwd(const std::string& dos_dir) { cwd_ = dos_dir.empty() ? "\\" : dos_dir; }
+    std::string cwd() const { return cwd_; }
+    // Change directory (relative/absolute, with . and ..). Returns true on success.
+    bool chdir(const std::string& dos_dir);
+    // Normalise a DOS path against the current directory into "\A\B" form.
+    std::string normalize(const std::string& dos_path) const;
     std::string host_path(const std::string& dos_path);   // exposed for the loader/EXEC
 
 private:
