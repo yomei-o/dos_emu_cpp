@@ -33,13 +33,17 @@ Anything unimplemented stops with a message naming the opcode or `INT` function 
 the address, so bringing up a new guest is a matter of following the messages —
 the same method used for the sibling emulator.
 
-## Status (staged, bring-up in progress)
+## 🕹 Live demo — [**yomei-o.github.io/dos_emu_cpp**](https://yomei-o.github.io/dos_emu_cpp/)
+Edit C, press **Compile & Run**: LSI C-86 compiles it (spawning its passes as DOS
+programs) into a DOS `.EXE`, which then runs — all in the browser tab.
 
-1. 🚧 16-bit CPU core + `.COM`/`.EXE` loader + minimal `INT 21h` (console, exit)
-2. ⏭ DOS file I/O, memory, PSP/argv → run a single LSI C pass on its own
-3. ⏭ `INT 21h AH=4Bh` EXEC (child processes) → the full `LCC` pipeline
-4. ⏭ compile a `.c` to `.EXE` and run it
-5. ⏭ WebAssembly build + browser demo (drop/edit a `.c`, compile & run in the page)
+## Status
+
+1. ✅ 16-bit CPU core + `.COM`/`.EXE` loader + `INT 21h` (console, exit)
+2. ✅ DOS file I/O, memory, PSP/environment → a single LSI C pass (CPP) runs
+3. ✅ `INT 21h AH=4Bh` EXEC (child processes) → the full `LCC` pipeline
+4. ✅ compile a `.c` to `.EXE` and run it (`hello from LSI C!`)
+5. ✅ WebAssembly build + browser demo (edit a `.c`, compile & run in the page)
 
 ## Building
 
