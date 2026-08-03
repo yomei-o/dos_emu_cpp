@@ -23,18 +23,22 @@ static std::vector<uint8_t> read_file(const char* path) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::fprintf(stderr, "usage: dosemu PROGRAM.EXE [args...]\n"); return 2; }
+    // dosemu [--root DIR] PROGRAM.EXE [guest args...]
+    std::string root = ".";
+    int a = 1;
+    if (a < argc && std::string(argv[a]) == "--root" && a + 1 < argc) { root = argv[a + 1]; a += 2; }
+    if (a >= argc) { std::fprintf(stderr, "usage: dosemu [--root DIR] PROGRAM.EXE [args...]\n"); return 2; }
 
-    std::vector<uint8_t> file = read_file(argv[1]);
-    if (file.empty()) { std::fprintf(stderr, "dosemu: cannot read %s\n", argv[1]); return 1; }
+    std::vector<uint8_t> file = read_file(argv[a]);
+    if (file.empty()) { std::fprintf(stderr, "dosemu: cannot read %s\n", argv[a]); return 1; }
 
     std::string cmdline;
-    for (int i = 2; i < argc; ++i) { cmdline += ' '; cmdline += argv[i]; }
+    for (int i = a + 1; i < argc; ++i) { cmdline += ' '; cmdline += argv[i]; }
 
     using namespace dosemu;
     Memory mem;
     Cpu cpu(mem);
-    Dos dos(cpu, mem);
+    Dos dos(cpu, mem, root);
     dos.output = [](int fd, const char* data, size_t len) {
         std::fwrite(data, 1, len, fd == 2 ? stderr : stdout);
     };

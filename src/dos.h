@@ -8,12 +8,13 @@
 #include <string>
 #include "cpu.h"
 #include "memory.h"
+#include "files.h"
 
 namespace dosemu {
 
 class Dos {
 public:
-    Dos(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
+    Dos(Cpu& cpu, Memory& mem, std::string root = ".") : cpu_(cpu), mem_(mem), files_(std::move(root)) {
         cpu_.on_int = [this](uint8_t n) { return handle(n); };
     }
 
@@ -21,12 +22,20 @@ public:
     std::function<void(int fd, const char* data, size_t len)> output;
 
     uint16_t psp_seg = 0;   // set by the loader
+    DosFiles& files() { return files_; }
 
     bool handle(uint8_t n);
 
 private:
     Cpu& cpu_;
     Memory& mem_;
+    DosFiles files_;
+
+    std::string read_asciiz(uint16_t seg, uint16_t off) {
+        std::string s;
+        for (int i = 0; i < 128; ++i) { char c = static_cast<char>(mem_.rb(seg, off + i)); if (!c) break; s += c; }
+        return s;
+    }
 
     // A bump allocator over conventional memory (paragraphs). Real DOS keeps an MCB
     // chain; a growing pointer is enough to satisfy a program's startup and malloc.
