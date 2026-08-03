@@ -29,8 +29,10 @@ public:
     // segment:offset convenience
     uint8_t  rb(uint16_t s, uint16_t o) const { return r8(phys(s, o)); }
     uint16_t rw(uint16_t s, uint16_t o) const { return r16(phys(s, o)); }
+    uint32_t rd(uint16_t s, uint16_t o) const { return r32(phys(s, o)); }
     void     wb(uint16_t s, uint16_t o, uint8_t v)  { w8(phys(s, o), v); }
     void     ww(uint16_t s, uint16_t o, uint16_t v) { w16(phys(s, o), v); }
+    void     wd(uint16_t s, uint16_t o, uint32_t v) { w32(phys(s, o), v); }
 
     void write(uint32_t a, const void* src, uint32_t len) {
         if ((a & 0xFFFFF) + len <= kSize) std::memcpy(&ram_[a & 0xFFFFF], src, len);

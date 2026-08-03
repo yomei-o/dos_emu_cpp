@@ -10,3 +10,6 @@ tests/*.exe
 fdos/
 *.zip
 djgpp/
+ow/
+scratch_root/
+dosroot/
