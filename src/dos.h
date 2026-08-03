@@ -53,6 +53,14 @@ private:
     int  last_child_code_ = 0;
     bool exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off);
 
+    // Disk Transfer Area + FindFirst/FindNext state (for DIR and friends).
+    uint16_t dta_seg_ = 0, dta_off_ = 0x80;
+    struct Found { std::string name; uint32_t size; bool is_dir; uint16_t date, time; };
+    std::vector<Found> find_;
+    size_t find_pos_ = 0;
+    bool find_first(const std::string& spec, uint16_t attr);
+    void write_dta_entry();
+
     void out(int fd, char c) { char b = c; if (output) output(fd, &b, 1); }
     int  getch() { int c = input ? input() : -1; return c == '\n' ? '\r' : c; }   // -1 at EOF
     bool int21();

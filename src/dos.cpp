@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <cctype>
+#include <filesystem>
 
 namespace dosemu {
 
@@ -69,6 +70,56 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     return true;
 }
 
+// DOS 8.3 wildcard match (case-insensitive) over "NAME.EXT".
+static bool wildmatch(const std::string& pat, const std::string& name) {
+    size_t p = 0, n = 0, star = std::string::npos, mark = 0;
+    auto up = [](char c){ return (char)std::toupper((unsigned char)c); };
+    while (n < name.size()) {
+        if (p < pat.size() && (pat[p] == '?' || up(pat[p]) == up(name[n]))) { ++p; ++n; }
+        else if (p < pat.size() && pat[p] == '*') { star = p++; mark = n; }
+        else if (star != std::string::npos) { p = star + 1; n = ++mark; }
+        else return false;
+    }
+    while (p < pat.size() && pat[p] == '*') ++p;
+    return p == pat.size();
+}
+
+bool Dos::find_first(const std::string& spec, uint16_t) {
+    find_.clear(); find_pos_ = 0;
+    std::string dir = spec, pat = "*";
+    size_t s = spec.find_last_of("/\\:");
+    if (s != std::string::npos) { pat = spec.substr(s + 1); dir = spec.substr(0, s + 1); }
+    else { pat = spec; dir = ""; }
+    if (pat.empty()) pat = "*";
+    std::string host = files_.host_path(dir.empty() ? "." : dir);
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(host, ec)) {
+        std::string nm = e.path().filename().string();
+        std::string dosname = nm;
+        for (char& c : dosname) c = (char)std::toupper((unsigned char)c);
+        if (!wildmatch(pat, dosname)) continue;
+        Found f; f.name = dosname; f.is_dir = e.is_directory(ec);
+        f.size = f.is_dir ? 0 : (uint32_t)e.file_size(ec);
+        f.date = ((1993 - 1980) << 9) | (8 << 5) | 19; f.time = (12 << 11);
+        find_.push_back(f);
+    }
+    return !find_.empty();
+}
+
+void Dos::write_dta_entry() {
+    const Found& f = find_[find_pos_++];
+    uint16_t s = dta_seg_, o = dta_off_;
+    for (int i = 0; i < 21; ++i) mem_.wb(s, o + i, 0);           // reserved (search state)
+    mem_.wb(s, o + 21, f.is_dir ? 0x10 : 0x20);                 // attribute
+    mem_.ww(s, o + 22, f.time);
+    mem_.ww(s, o + 24, f.date);
+    mem_.w16(Memory::phys(s, o + 26), f.size & 0xFFFF);
+    mem_.w16(Memory::phys(s, o + 28), f.size >> 16);
+    std::string nm = f.name; if (nm.size() > 12) nm.resize(12);
+    for (size_t i = 0; i < nm.size(); ++i) mem_.wb(s, o + 30 + i, nm[i]);
+    mem_.wb(s, o + 30 + nm.size(), 0);
+}
+
 bool Dos::handle(uint8_t n) {
     switch (n) {
         case 0x20: terminate(0); return true;           // terminate program
@@ -85,6 +136,9 @@ bool Dos::handle(uint8_t n) {
             }
             return true;
         }
+        case 0x2F:                                       // DOS multiplex
+            if (cpu_.r[AX] == 0xAE00) cpu_.sb(AX, 0);     // no installable-command extension
+            return true;
         case 0x10:                                       // BIOS video — accept and ignore
         case 0x1A:                                       // BIOS time
             return true;
@@ -143,6 +197,25 @@ bool Dos::int21() {
         case 0x0C: return true;                                     // flush + input — ignore
         case 0x0E: cpu_.sb(AX, 3); return true;                     // select drive -> report 3 drives
         case 0x19: cpu_.sb(AX, 0); return true;                     // get current drive -> A:
+        case 0x1A: dta_seg_ = cpu_.sreg[DS]; dta_off_ = cpu_.r[DX]; return true;   // set DTA
+        case 0x2F: cpu_.sreg[ES] = dta_seg_; cpu_.r[BX] = dta_off_; return true;   // get DTA -> ES:BX
+        case 0x4E:                                                  // find first (DS:DX spec, CX attr)
+            if (cpu_.r[CX] == 0x08) { cpu_.flags |= CF; cpu_.r[AX] = 18; return true; }  // no volume label
+            if (find_first(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]), cpu_.r[CX])) { write_dta_entry(); cpu_.flags &= ~CF; }
+            else { cpu_.flags |= CF; cpu_.r[AX] = 18; }             // no more files
+            return true;
+        case 0x4F:                                                  // find next
+            if (find_pos_ < find_.size()) { write_dta_entry(); cpu_.flags &= ~CF; }
+            else { cpu_.flags |= CF; cpu_.r[AX] = 18; }
+            return true;
+        case 0x36:                                                  // get free disk space (DL drive)
+            cpu_.r[AX] = 8;        // sectors per cluster
+            cpu_.r[CX] = 512;      // bytes per sector
+            cpu_.r[BX] = 0xFFFF;   // free clusters
+            cpu_.r[DX] = 0xFFFF;   // total clusters
+            return true;
+        case 0x69: cpu_.flags &= ~CF; return true;                  // get/set disk serial: accept
+        case 0x73: cpu_.flags |= CF; return true;                   // FAT32 free space: unsupported -> use 36h
         case 0x47: {                                                // get current directory (DL drive) -> DS:SI (root)
             mem_.wb(cpu_.sreg[DS], cpu_.r[SI], 0);                   // empty = root
             cpu_.sb(AX, 0); cpu_.flags &= ~CF; return true;
@@ -174,8 +247,10 @@ bool Dos::int21() {
                 default: break;                       // set strategy / set UMB link: accept
             }
             cpu_.flags &= ~CF; return true;
-        case 0x65:                                                  // get extended country info -> minimal, ok
-            cpu_.flags &= ~CF; return true;
+        case 0x65:                                                  // get extended country info: report "not
+            cpu_.r[AX] = 1; cpu_.flags |= CF; return true;          // supported" so callers (FreeCOM) keep
+                                                                    // their own sane NLS fallback (valid
+                                                                    // filename chars etc.) instead of our blank.
         case 0x71:                                                  // Windows long-filename API: not supported
             cpu_.r[AX] = 0x7100; cpu_.flags |= CF; return true;     // the standard "no LFN" answer
         case 0x33: cpu_.sb(DX, 0); cpu_.flags &= ~CF; return true;  // get/set Ctrl-Break flag -> off
