@@ -50,7 +50,7 @@ int main(void)
     return 0;
 }
 </textarea>
-    <div class="hint">At the prompt try: <code>lcc prog.c</code> &nbsp;then&nbsp; <code>prog</code></div>
+    <div class="hint">Try: <code>dir</code> &nbsp;·&nbsp; <code>lcc prog.c</code> &nbsp;·&nbsp; <code>dir</code> &nbsp;·&nbsp; <code>prog</code> &nbsp;·&nbsp; <code>ver</code> &nbsp;·&nbsp; <code>type prog.c</code></div>
   </div>
 
   <div class="panel">
@@ -61,9 +61,9 @@ int main(void)
   </div>
 
   <footer>Each line runs as <code>COMMAND.COM /C &lt;command&gt;</code> — a real FreeCOM
-    dispatch (PATH search, EXEC of external programs; the compiler's passes run as nested
-    DOS programs). External commands work; some FreeCOM internals and full interactive
-    line-editing are still being brought up. See the
+    dispatch. FreeCOM's internal commands (<code>dir</code>, <code>type</code>,
+    <code>ver</code>, <code>echo</code>, …) and external programs (the compiler and the
+    <code>.EXE</code> it builds, run as nested DOS programs) both work. See the
     <a href="https://github.com/yomei-o/dos_emu_cpp">README</a>.</footer>
 </main>
 
