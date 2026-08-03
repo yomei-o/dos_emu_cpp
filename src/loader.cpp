@@ -9,6 +9,8 @@
 
 namespace dosemu {
 
+bool is_djgpp_coff(const std::vector<uint8_t>&);
+
 // A shared environment block (PATH so the compiler driver finds its passes, and
 // the program's own full path — which a shell like FreeCOM reads to find itself).
 static constexpr uint16_t kEnvSeg = 0x00F0;
@@ -43,6 +45,15 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
 
     build_env(mem, dos_name);
     build_psp(mem, psp_seg, cmdline);
+
+    // A DJGPP program is a real-mode DOS stub wrapping an i386 COFF image; running it
+    // needs 32-bit protected mode + a DPMI host, which are not implemented yet. Detect
+    // it up front and say so, rather than crashing inside the stub on a 32-bit opcode.
+    if (is_djgpp_coff(f)) {
+        err = "DJGPP/DPMI 32-bit program (i386 COFF): protected-mode + DPMI support is "
+              "not implemented yet (see resume.md). The 16-bit DOS side works.";
+        return false;
+    }
 
     bool is_mz = f.size() >= 2 && f[0] == 'M' && f[1] == 'Z';
     if (is_mz) {

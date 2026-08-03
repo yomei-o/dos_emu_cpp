@@ -9,3 +9,4 @@ lsic/
 tests/*.exe
 fdos/
 *.zip
+djgpp/
