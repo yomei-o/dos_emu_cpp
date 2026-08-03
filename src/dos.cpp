@@ -309,6 +309,18 @@ bool Dos::int21() {
             } else cpu_.flags &= ~CF;                                // set: accept
             return true;
         }
+        case 0x39: {                                                // create directory (DS:DX name)
+            std::error_code ec;
+            bool ok = std::filesystem::create_directory(files_.host_path(read_asciiz(cpu_.sreg[DS], cpu_.r[DX])), ec);
+            if (ok && !ec) cpu_.flags &= ~CF; else { cpu_.flags |= CF; cpu_.r[AX] = 3; }
+            return true;
+        }
+        case 0x3A: {                                                // remove directory (DS:DX name)
+            std::error_code ec;
+            bool ok = std::filesystem::remove(files_.host_path(read_asciiz(cpu_.sreg[DS], cpu_.r[DX])), ec);
+            if (ok && !ec) cpu_.flags &= ~CF; else { cpu_.flags |= CF; cpu_.r[AX] = 5; }
+            return true;
+        }
         case 0x3C: {                                                // create file (CX attr, DS:DX name) -> handle
             int h = files_.create(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]), cpu_.r[CX]);
             if (h < 0) { cpu_.flags |= CF; cpu_.r[AX] = -h; } else { cpu_.flags &= ~CF; cpu_.r[AX] = h; }

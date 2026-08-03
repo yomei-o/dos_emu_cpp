@@ -48,6 +48,7 @@ public:
 
     Memory& mem() { return mem_; }
     uint64_t insns = 0;
+    uint64_t max_insns = 0;   // 0 = unlimited; otherwise stop with an error (runaway guard)
 
 private:
     Memory& mem_;

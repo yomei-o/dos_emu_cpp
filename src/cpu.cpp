@@ -50,6 +50,8 @@ void Cpu::interrupt(uint8_t n) {
 
 void Cpu::step() {
     ++insns;
+    if (max_insns && insns > max_insns)
+        throw CpuError{"instruction limit exceeded (runaway program?)", sreg[CS], ip};
     Decode d;
     uint8_t op;
 

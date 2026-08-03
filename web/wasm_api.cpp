@@ -21,7 +21,7 @@ static void js_log(const char*) {}
 #endif
 
 namespace dosemu {
-bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&);
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&);
 }
 
 static std::vector<uint8_t> read_host(const std::string& path) {
@@ -51,7 +51,9 @@ int dosemu_run(const char* prog_host, const char* root, const char* cmdtail) {
 
     std::string err;
     std::string tail = cmdtail ? cmdtail : "";
-    if (!load_program(file, cpu, 0x0100, tail, err)) { js_log(err.c_str()); return -1; }
+    std::string dn = prog_host; { auto s=dn.find_last_of("/\\"); if(s!=std::string::npos) dn=dn.substr(s+1); } for(char&c:dn)c=(char)toupper((unsigned char)c); dn="A:\\"+dn;
+    if (!load_program(file, cpu, 0x0100, tail, err, dn)) { js_log(err.c_str()); return -1; }
+    cpu.max_insns = 2000000000ULL;   // ~ generous for a compile; guards against a runaway freezing the page
     dos.psp_seg = 0x0100;
 
     try {
