@@ -42,6 +42,14 @@ private:
     uint16_t heap_next_ = 0x3000;   // ~192 KiB, above where programs load
     uint16_t heap_end_  = 0x9F00;   // just below the video/BIOS area (~640 KiB)
 
+    // EXEC (AH=4Bh): a child runs on the same CPU via a nested loop. terminate()
+    // ends the whole process at depth 0 but only the child at depth > 0.
+    int  exec_depth_ = 0;
+    bool child_exited_ = false;
+    int  child_code_ = 0;
+    int  last_child_code_ = 0;
+    bool exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off);
+
     void out(int fd, char c) { char b = c; if (output) output(fd, &b, 1); }
     bool int21();
     bool int21_default(uint8_t n);

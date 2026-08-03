@@ -9,7 +9,7 @@
 #include "memory.h"
 
 namespace dosemu {
-bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t&, const std::string&, std::string&);
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&);
 }
 
 static std::vector<uint8_t> read_file(const char* path) {
@@ -43,12 +43,12 @@ int main(int argc, char** argv) {
         std::fwrite(data, 1, len, fd == 2 ? stderr : stdout);
     };
 
-    uint16_t psp = 0; std::string err;
-    if (!load_program(file, cpu, psp, cmdline, err)) {
+    std::string err;
+    if (!load_program(file, cpu, 0x0100, cmdline, err)) {
         std::fprintf(stderr, "dosemu: %s\n", err.c_str());
         return 1;
     }
-    dos.psp_seg = psp;
+    dos.psp_seg = 0x0100;
 
     try {
         cpu.run();

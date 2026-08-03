@@ -2,12 +2,71 @@
 #include "dos.h"
 #include <cstdio>
 #include <vector>
+#include <string>
+#include <cctype>
 
 namespace dosemu {
 
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&);
+
 void Dos::terminate(int code) {
+    if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
     cpu_.exit_code = code;
     cpu_.halted = true;
+}
+
+// INT 21h AH=4Bh AL=0: load and run a child program to completion, then return to
+// the parent. The child runs on the same CPU through a nested step loop; the
+// parent's registers, PSP and heap mark are saved and restored around it.
+bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
+    std::string host = files_.host_path(name);
+    std::FILE* fp = std::fopen(host.c_str(), "rb");
+    if (!fp) { cpu_.flags |= CF; cpu_.r[AX] = 2; return true; }   // file not found
+    std::fseek(fp, 0, SEEK_END); long n = std::ftell(fp); std::fseek(fp, 0, SEEK_SET);
+    std::vector<uint8_t> file(n > 0 ? n : 0);
+    if (n > 0) { if (std::fread(file.data(), 1, n, fp) != (size_t)n) file.clear(); }
+    std::fclose(fp);
+    if (file.empty()) { cpu_.flags |= CF; cpu_.r[AX] = 2; return true; }
+
+    // Parameter block: [0]=env seg, [2..5]=cmdline far ptr (offset,segment).
+    uint16_t cmd_off = mem_.rw(pb_seg, pb_off + 2);
+    uint16_t cmd_seg = mem_.rw(pb_seg, pb_off + 4);
+    uint8_t taillen = mem_.rb(cmd_seg, cmd_off);
+    std::string tail;
+    for (uint8_t i = 0; i < taillen; ++i) { char c = static_cast<char>(mem_.rb(cmd_seg, cmd_off + 1 + i)); if (c == '\r') break; tail += c; }
+
+    // Save the parent's whole context.
+    uint16_t sr[8], ss[4], sip = cpu_.ip, sfl = cpu_.flags, spsp = psp_seg, sheap = heap_next_;
+    for (int i = 0; i < 8; ++i) sr[i] = cpu_.r[i];
+    for (int i = 0; i < 4; ++i) ss[i] = cpu_.sreg[i];
+
+    uint16_t child_psp = heap_next_;
+    heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
+
+    std::string err;
+    if (!load_program(file, cpu_, child_psp, tail, err)) {
+        for (int i = 0; i < 8; ++i) cpu_.r[i] = sr[i];
+        for (int i = 0; i < 4; ++i) cpu_.sreg[i] = ss[i];
+        cpu_.ip = sip; cpu_.flags = sfl; psp_seg = spsp; heap_next_ = sheap;
+        cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
+    }
+    psp_seg = child_psp;
+
+    // Run the child to completion.
+    bool saved_exited = child_exited_; child_exited_ = false;
+    ++exec_depth_;
+    while (!child_exited_ && !cpu_.halted) cpu_.step();
+    --exec_depth_;
+    int code = child_code_;
+    child_exited_ = saved_exited;
+
+    // Restore the parent and hand it the child's exit code (via AH=4Dh).
+    for (int i = 0; i < 8; ++i) cpu_.r[i] = sr[i];
+    for (int i = 0; i < 4; ++i) cpu_.sreg[i] = ss[i];
+    cpu_.ip = sip; cpu_.flags = sfl; psp_seg = spsp; heap_next_ = sheap;
+    last_child_code_ = code;
+    cpu_.flags &= ~CF; cpu_.r[AX] = 0;
+    return true;
 }
 
 bool Dos::handle(uint8_t n) {
@@ -61,6 +120,25 @@ bool Dos::int21() {
             uint8_t v = cpu_.r[AX] & 0xFF;
             cpu_.r[BX] = mem_.r16(v * 4);
             cpu_.sreg[ES] = mem_.r16(v * 4 + 2);
+            return true;
+        }
+        case 0x29: {                                                // parse filename (DS:SI) into an FCB (ES:DI)
+            uint16_t sseg = cpu_.sreg[DS], si = cpu_.r[SI];
+            uint16_t eseg = cpu_.sreg[ES], di = cpu_.r[DI];
+            while (mem_.rb(sseg, si) == ' ') ++si;                   // skip leading blanks
+            uint8_t drive = 0;
+            if (mem_.rb(sseg, si + 1) == ':') { drive = (std::toupper(mem_.rb(sseg, si)) - 'A') + 1; si += 2; }
+            mem_.wb(eseg, di, drive);
+            auto fill = [&](int at, int width, bool ext) {
+                for (int i = 0; i < width; ++i) mem_.wb(eseg, di + at + i, ' ');
+                int i = 0;
+                while (i < width) { char c = static_cast<char>(mem_.rb(sseg, si)); if (!c || c == ' ' || c == '\r' || (!ext && c == '.') || c == '/' ) break; if (c=='.') break; mem_.wb(eseg, di + at + i, std::toupper(c)); ++si; ++i; }
+                while (mem_.rb(sseg, si) && mem_.rb(sseg, si) != ' ' && mem_.rb(sseg, si) != '.' && mem_.rb(sseg, si) != '\r' && !ext) ++si;
+            };
+            fill(1, 8, false);
+            if (mem_.rb(sseg, si) == '.') { ++si; fill(9, 3, true); }
+            else { for (int i = 0; i < 3; ++i) mem_.wb(eseg, di + 9 + i, ' '); }
+            cpu_.sb(AX, 0); cpu_.r[SI] = si;
             return true;
         }
         case 0x2A:                                                  // get date -> CX=year DH=month DL=day AL=dow
@@ -156,7 +234,12 @@ bool Dos::int21() {
             // is granted up to the arena, which is all the guest needs here.
             cpu_.flags &= ~CF; return true;
         }
+        case 0x4B:                                                  // load & execute (AL=0) / load overlay
+            if ((cpu_.r[AX] & 0xFF) == 0)
+                return exec(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]), cpu_.sreg[ES], cpu_.r[BX]);
+            cpu_.flags |= CF; cpu_.r[AX] = 1; return true;          // other subfunctions unsupported
         case 0x4C: terminate(cpu_.r[AX] & 0xFF); return true;       // terminate with return code
+        case 0x4D: cpu_.r[AX] = last_child_code_ & 0xFF; return true;  // get child return code
         default:
             std::fprintf(stderr, "[dos] unimplemented INT 21h AH=%02Xh at %04X:%04X\n",
                          ah, cpu_.sreg[CS], cpu_.ip);
