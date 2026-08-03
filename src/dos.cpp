@@ -73,6 +73,18 @@ bool Dos::handle(uint8_t n) {
     switch (n) {
         case 0x20: terminate(0); return true;           // terminate program
         case 0x21: return int21();
+        case 0x16: {                                     // BIOS keyboard services
+            uint8_t ah = cpu_.r[AX] >> 8;
+            if (ah == 0x00 || ah == 0x10) {              // read a key -> AL=ascii, AH=scancode
+                int c = getch(); if (c < 0) c = 0x1A;
+                cpu_.r[AX] = (static_cast<uint16_t>(c ? 0x1C : 0) << 8) | (c & 0xFF);
+            } else if (ah == 0x01 || ah == 0x11) {       // key available? -> ZF=0 and peek in AX
+                cpu_.flags &= ~ZF; cpu_.r[AX] = 0x1C0D;  // pretend Enter is waiting
+            } else if (ah == 0x02) {                     // shift status
+                cpu_.sb(AX, 0);
+            }
+            return true;
+        }
         case 0x10:                                       // BIOS video — accept and ignore
         case 0x1A:                                       // BIOS time
             return true;
@@ -127,13 +139,33 @@ bool Dos::int21() {
             cpu_.sb(AX, '$');
             return true;
         }
-        case 0x0B: cpu_.sb(AX, 0); return true;                     // check input status: none
+        case 0x0B: cpu_.sb(AX, 0xFF); return true;                  // check input status: char available
         case 0x0C: return true;                                     // flush + input — ignore
         case 0x0E: cpu_.sb(AX, 3); return true;                     // select drive -> report 3 drives
         case 0x19: cpu_.sb(AX, 0); return true;                     // get current drive -> A:
         case 0x47: {                                                // get current directory (DL drive) -> DS:SI (root)
             mem_.wb(cpu_.sreg[DS], cpu_.r[SI], 0);                   // empty = root
             cpu_.sb(AX, 0); cpu_.flags &= ~CF; return true;
+        }
+        case 0x38: {                                                // get country info (DS:DX 34-byte buffer)
+            uint16_t seg = cpu_.sreg[DS], off = cpu_.r[DX];
+            for (int i = 0; i < 34; ++i) mem_.wb(seg, off + i, 0);
+            mem_.ww(seg, off + 0, 0);        // date format: 0 = USA (m d y)
+            mem_.wb(seg, off + 2, '$');       // currency symbol
+            mem_.wb(seg, off + 7, ',');       // thousands separator
+            mem_.wb(seg, off + 9, '.');       // decimal separator
+            mem_.wb(seg, off + 11, '-');      // date separator
+            mem_.wb(seg, off + 13, ':');      // time separator
+            mem_.wb(seg, off + 17, 0);        // time format: 12-hour
+            // case-map: a far routine that uppercases AL. Plant it in scratch and
+            // point the country block at it (offset 18 = far pointer).
+            const uint16_t cseg = 0x0090, coff = 0x0100;
+            const uint8_t cm[] = { 0x3C,0x61, 0x72,0x06, 0x3C,0x7A, 0x77,0x02, 0x2C,0x20, 0xCB };  // cmp/jb/cmp/ja/sub/retf
+            for (size_t i = 0; i < sizeof cm; ++i) mem_.wb(cseg, coff + i, cm[i]);
+            mem_.ww(seg, off + 18, coff); mem_.ww(seg, off + 20, cseg);
+            mem_.wb(seg, off + 22, ',');      // data-list separator
+            cpu_.r[BX] = 1;                   // country code = USA
+            cpu_.flags &= ~CF; return true;
         }
         case 0x58:                                                  // get/set allocation strategy / UMB link
             switch (cpu_.r[AX] & 0xFF) {
@@ -220,7 +252,16 @@ bool Dos::int21() {
         case 0x3F: {                                                // read (BX handle, CX bytes, DS:DX buf)
             uint16_t h = cpu_.r[BX], cnt = cpu_.r[CX], seg = cpu_.sreg[DS], off = cpu_.r[DX];
             int cfd;
-            if (files_.is_console(h, cfd)) { cpu_.r[AX] = 0; cpu_.flags &= ~CF; return true; }  // stdin EOF for now
+            if (files_.is_console(h, cfd)) {                        // console read: a line, CR/LF terminated
+                uint16_t k = 0;
+                while (k < cnt) {
+                    int c = getch();
+                    if (c < 0) break;                               // EOF
+                    if (c == '\r') { out(1,'\r'); mem_.wb(seg, off + k++, '\r'); if (k < cnt) { out(1,'\n'); mem_.wb(seg, off + k++, '\n'); } break; }
+                    out(1, static_cast<char>(c)); mem_.wb(seg, off + k++, static_cast<uint8_t>(c));
+                }
+                cpu_.r[AX] = k; cpu_.flags &= ~CF; return true;
+            }
             std::vector<uint8_t> buf(cnt);
             int n = files_.read(h, buf.data(), cnt);
             if (n < 0) { cpu_.flags |= CF; cpu_.r[AX] = -n; return true; }
