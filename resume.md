@@ -3,6 +3,13 @@
 Working notes for picking the project back up. The README says what the emulator
 *is*; this says what works, what's next, and what was learned.
 
+> **⚠️ Active WIP is on branch `wip-pmode-dpmi`.** The protected-mode/DPMI CPU
+> groundwork is written there but currently **breaks the LSI C regression** (the CF
+> pass crashes). `main` is the last regression-green state (80386 real-mode core).
+> To continue: `git checkout wip-pmode-dpmi` and read *its* resume.md — it has the
+> precise crash diagnosis (CF dies at ~insn 640, `E8` at `3010:0321` → zeroed
+> `3010:9708`), the CF-gated `dbg` trace recipe, and the prime suspects to check.
+
 ## State (all verified, on the browser build too)
 
 A 16-bit real-mode 8086 MS-DOS emulator in C++/WebAssembly.
