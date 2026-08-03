@@ -29,51 +29,65 @@ to `lsic/`; FreeCOM is `fdos/`; the browser bundle is `web/lsic.tar.gz`.
 
 ## Next: DJGPP / DOS extender (DPMI, 32-bit protected mode)
 
-The goal: run DJGPP programs (32-bit DOS gcc etc.). This is the big one — roughly a
-second CPU (32-bit protected mode) plus a DPMI host on top of the working 16-bit core.
+The goal: run 32-bit DOS-extended programs — **DJGPP** (gcc etc.) *and* **OpenWatcom**
+(wcc/wcc386/wlink), which is what compiles FreeCOM. Both are the same shape: a
+real-mode stub wrapping a 32-bit image that switches to protected mode via a DPMI
+host. They share everything below except the image loader (COFF vs LE).
 
-**What a DJGPP `.EXE` is** (measured, `djgpp/bin/djecho.exe`, a 97 KB test program;
-`djgpp/CWSDPMI.EXE` is the stock DPMI host, both gitignored):
-- a **2 KB real-mode DOS stub** (go32) — MZ, followed by
-- an **i386 COFF** image at the stub's end: machine `0x14C`, a.out magic `0x10B`,
-  entry `0x18B0`, sections `.text` (v `0x18a8`), `.data` (v `0x13c00`), `.bss`.
-  `src/coff_loader.cpp` already detects (`is_djgpp_coff`) and parses this.
-- The stub finds/loads a DPMI host, switches to 32-bit protected mode, maps the COFF
-  flat and jumps to its entry. `load_program()` now detects a DJGPP exe and returns a
-  clear "not implemented yet" message instead of crashing.
+- **DJGPP** `.EXE` (measured, `djgpp/bin/djecho.exe`): 2 KB real-mode **go32** stub +
+  **i386 COFF** (machine `0x14C`, magic `0x10B`, entry `0x18B0`, `.text`/`.data`/`.bss`).
+  `src/coff_loader.cpp` detects (`is_djgpp_coff`) and parses it.
+- **OpenWatcom** DOS `.EXE` (measured, `ow/binw/wcc.exe` etc., gitignored under `ow/`):
+  MZ + **LE** (linear executable) at `e_lfanew`, string `"DOS/4G"`. `wcc`/`wcc386`/
+  `wlink` are all DOS/4GW. `wcl.exe` is a plain 16-bit driver that just spawns them.
 
-**First gap hit today:** running the stub in the 16-bit core faults at ~457
-instructions on opcode **`0x66`** — the 32-bit operand-size prefix. That is the door
-to everything below.
+### DONE — 80386 real-mode core (`src/cpu.cpp`, committed, regression-clean)
 
-**Plan (recommended order):**
+The 32-bit CPU is built the safe way: `uint16_t r[8]` unchanged, upper halves in a
+parallel `uint16_t rhi[8]` (`gd`/`sd` in cpu.h), so 16-bit writes preserve the upper
+halves like a real 386 and **every 16-bit path is byte-for-byte identical**. Added:
+`0x66/0x67` prefixes → `o32`/`a32`; 32-bit ModRM + SIB; FS/GS + `0x64/0x65` overrides;
+width-generic ALU/MOV/PUSH/POP/INC-DEC/TEST/XCHG/shift/string/mul-div; PUSHA/POPA,
+PUSH imm, IMUL r/rm/imm, ENTER/LEAVE, CWDE/CDQ; the `0x0F` map (long Jcc, SETcc,
+CMOVcc, MOVZX/MOVSX, IMUL, BT/BTS/BTR/BTC, SHLD/SHRD, BSF/BSR, PUSH/POP FS/GS,
+LSS/LFS/LGS, CPUID/RDTSC stubs); and the system instructions that arm the mode
+switch (MOV CRn/DRn, LGDT/LIDT/SGDT/SIDT, LMSW/SMSW, LLDT/LTR, CLTS) writing new
+`cr[]`/`dr[]`/`gdt_*`/`idt_*`/`ldtr`/`tr` state in cpu.h.
 
-1. **32-bit CPU.** Give the interpreter 32-bit registers and operands. Safest way
-   that won't disturb the working 16-bit paths: keep `uint16_t r[8]` and add a
-   parallel `uint16_t rhi[8]` for the upper halves (a 32-bit reg is
-   `(rhi[i]<<16)|r[i]`); 16-bit ops stay untouched. Handle the `0x66` (operand-size)
-   and `0x67` (address-size) prefixes → an `osize`/`asize` in the decoder, and add
-   32-bit forms of the ALU/MOV/PUSH/POP/string/shift group plus 386 additions
-   (MOVZX/MOVSX 0F B6/B7/BE/BF, SETcc, BT group, IMUL variants, SIB addressing).
-2. **Protected mode.** GDT/LDT/IDT, selectors → descriptor {base,limit,flags};
-   `LGDT`/`LIDT`/`LMSW`/`MOV CRn`, protected-mode far jump, the real↔protected switch.
-   Segment reads become descriptor-based (base+offset) instead of `seg<<4`.
-3. **DPMI host — build our own, don't run CWSDPMI.** Intercept the stub's DPMI
-   detection (`INT 2Fh AX=1687h` → return "present" + a mode-switch entry point that
-   we service), then provide `INT 31h` services the go32 client uses: LDT descriptor
-   alloc/free (`0000/0001`), set base/limit (`0007/0008`), allocate memory (`0501`),
-   map, get/set exception & protected-mode interrupt vectors, and **simulate real-mode
-   interrupt (`0300`)** so the client's DOS calls (INT 21h etc.) reflect back into the
-   existing 16-bit DOS layer. Building the host ourselves avoids emulating CWSDPMI's
-   own real→PM code.
-4. **Load the COFF flat** (`coff_loader.cpp` → map `.text`/`.data`, zero `.bss`, set
-   flat 4 GB CS/DS/SS selectors) and jump to `entry` in 32-bit mode.
-5. **Reuse the DOS layer** for file/console I/O via the `0300` real-mode reflection,
-   with 32-bit register access.
+**Validated with real extender code** (probe: temporarily no-op the `is_djgpp_coff`
+bail in `loader.cpp`, build, run): the go32 stub and the DOS/4GW stub both now run
+all the way through their real-mode setup and stop exactly at the DPMI check —
+DJGPP prints `no DPMI - Get csdpmi*b.zip`, DOS/4GW prints `Can't run DOS/4G(W)`.
+The old `0x66` fault is gone. So the CPU is ready; what's missing is the mode switch.
 
-Test target: `djecho.exe` first (tiny), then a real DJGPP tool, then `gcc` itself.
-This is multi-session; do the 32-bit CPU behind regression tests (LSI C + FreeCOM
-must keep passing) before touching protected mode / DPMI.
+### TODO — protected mode + built-in DPMI host (the next milestone)
+
+1. **Bigger address space.** `Memory` is 1 MiB flat. Protected-mode flat clients
+   address many MB. Add extended RAM (e.g. 16 MB) reachable by *physical* 32-bit
+   address; real mode keeps using the low 1 MiB. (This is the first concrete step.)
+2. **Protected mode.** Selector→descriptor {base,limit,flags} from GDT/LDT; when
+   `cr[0]&PE`, segment access is `base+offset` (32-bit) not `seg<<4`. Instruction
+   fetch and stack switch to the descriptor model. The system instrs above already
+   load the tables.
+3. **DPMI host — build our own, don't run CWSDPMI.** Intercept `INT 2Fh AX=1687h` →
+   return present (CF=0), 32-bit capable (BX bit0), CPU=3, ver 0.90, SI=0 paras
+   needed, `ES:DI` = a real-mode entry we recognise. When the stub far-calls it,
+   perform the real→protected switch ourselves. Then service `INT 31h`: descriptor
+   alloc/free (`0000/0001`), set base/limit (`0007/0008`), alloc LDT selectors,
+   allocate memory (`0501`), get/set exception & PM interrupt vectors, real-mode
+   callbacks, and **simulate real-mode interrupt (`0300`)** so the client's DOS/BIOS
+   calls reflect back into the existing 16-bit DOS layer (with 32-bit regs).
+4. **Image load.** DJGPP: map COFF `.text`/`.data`, zero `.bss` (`coff_loader.cpp`),
+   flat 4 GB CS/DS/SS/ES/FS/GS selectors, jump to `entry`. OpenWatcom: write an LE
+   loader (objects → pages, relocations/fixups) and hand DOS/4GW's own extender
+   code protected mode via our DPMI host (it becomes a DPMI *client*, same path).
+5. **Reuse the DOS layer** for I/O via `0300` reflection. Also add INT 21h **AH=31h**
+   (TSR) — the go32 stub calls it during DPMI setup (seen in the probe).
+
+Test order: `djecho.exe` (tiny COFF) → prove protected mode + DPMI + COFF; then the
+LE loader → `wcl hello.c` (OpenWatcom parity with the LSI C demo); then scale toward
+FreeCOM's full `wmake` build. Keep LSI C + FreeCOM green throughout (`node
+web/test_shell.mjs`, native `LCC.EXE PROG.C`).
 
 ## Practical notes
 

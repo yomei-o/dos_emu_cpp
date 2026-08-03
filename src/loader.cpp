@@ -49,9 +49,14 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
     // A DJGPP program is a real-mode DOS stub wrapping an i386 COFF image; running it
     // needs 32-bit protected mode + a DPMI host, which are not implemented yet. Detect
     // it up front and say so, rather than crashing inside the stub on a 32-bit opcode.
+    // A DJGPP program is a real-mode DOS stub (go32) wrapping an i386 COFF image; an
+    // OpenWatcom DOS program is the same idea with a DOS/4GW stub wrapping an LE image.
+    // The 386 real-mode core now runs both stubs all the way to their DPMI check — the
+    // next milestone is the protected-mode switch + a built-in DPMI host (see resume.md).
     if (is_djgpp_coff(f)) {
-        err = "DJGPP/DPMI 32-bit program (i386 COFF): protected-mode + DPMI support is "
-              "not implemented yet (see resume.md). The 16-bit DOS side works.";
+        err = "DJGPP 32-bit program (i386 COFF): the go32 stub runs but needs the "
+              "protected-mode + DPMI host, which is the next milestone (see resume.md). "
+              "The 16-bit DOS side works.";
         return false;
     }
 
