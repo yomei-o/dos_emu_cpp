@@ -29,17 +29,17 @@ namespace {
 struct Modrm {
     uint8_t mod, reg, rm;
     bool is_reg;
-    uint16_t seg;        // segment selector for memory operands
+    int seg_idx;         // segment register index (ES..GS) for memory operands
     uint32_t off;        // effective offset (16- or 32-bit)
 };
 }
 
 // Decode context lives in the step() frame; pass what the helpers need.
 struct Decode {
-    uint16_t seg_ovr = 0xFFFF;   // segment override, or 0xFFFF
+    int seg_ovr_idx = DS;        // segment override register index
     bool have_ovr = false;
-    bool o32 = false;            // 0x66: 32-bit operand size
-    bool a32 = false;            // 0x67: 32-bit address size
+    bool o32 = false;            // 0x66 seen: toggles operand size vs the CS default
+    bool a32 = false;            // 0x67 seen: toggles address size vs the CS default
 };
 
 // The interpreter is one big method to keep the hot state in locals.
@@ -50,17 +50,19 @@ void Cpu::interrupt(uint8_t n) {
     // Fall back to the real interrupt vector table (rarely used by our guests).
     push16(flags);
     push16(sreg[CS]);
-    push16(ip);
+    push16(static_cast<uint16_t>(ip));
     set_flag(IF, false);
     set_flag(TF, false);
     ip = mem_.r16(n * 4);
-    sreg[CS] = mem_.r16(n * 4 + 2);
+    set_seg(CS, mem_.r16(n * 4 + 2));
 }
 
 void Cpu::step() {
     ++insns;
     if (max_insns && insns > max_insns)
-        throw CpuError{"instruction limit exceeded (runaway program?)", sreg[CS], ip};
+        throw CpuError{"instruction limit exceeded (runaway program?)", sreg[CS], static_cast<uint16_t>(ip)};
+    // The DPMI mode-switch entry: reaching it runs the host switch, not an instruction.
+    if (pm_switch_addr != 0xFFFFFFFFu && on_pm_switch && lin(CS, ip) == pm_switch_addr) { on_pm_switch(); return; }
     Decode d;
     uint8_t op;
 
@@ -69,12 +71,12 @@ void Cpu::step() {
     for (;;) {
         op = fetch8();
         switch (op) {
-            case 0x26: d.seg_ovr = sreg[ES]; d.have_ovr = true; continue;
-            case 0x2E: d.seg_ovr = sreg[CS]; d.have_ovr = true; continue;
-            case 0x36: d.seg_ovr = sreg[SS]; d.have_ovr = true; continue;
-            case 0x3E: d.seg_ovr = sreg[DS]; d.have_ovr = true; continue;
-            case 0x64: d.seg_ovr = sreg[FS]; d.have_ovr = true; continue;
-            case 0x65: d.seg_ovr = sreg[GS]; d.have_ovr = true; continue;
+            case 0x26: d.seg_ovr_idx = ES; d.have_ovr = true; continue;
+            case 0x2E: d.seg_ovr_idx = CS; d.have_ovr = true; continue;
+            case 0x36: d.seg_ovr_idx = SS; d.have_ovr = true; continue;
+            case 0x3E: d.seg_ovr_idx = DS; d.have_ovr = true; continue;
+            case 0x64: d.seg_ovr_idx = FS; d.have_ovr = true; continue;
+            case 0x65: d.seg_ovr_idx = GS; d.have_ovr = true; continue;
             case 0x66: d.o32 = true; continue;   // operand-size prefix
             case 0x67: d.a32 = true; continue;   // address-size prefix
             case 0xF0: continue;                 // LOCK: no-op here
@@ -83,7 +85,10 @@ void Cpu::step() {
         }
         break;
     }
-    bool o32 = d.o32;
+    // Effective sizes: the prefix toggles the code segment's default (16 in real mode
+    // and 16-bit code segments, 32 in a 32-bit code segment).
+    bool o32 = d.o32 ^ cs_d;
+    bool a32 = d.a32 ^ cs_d;
 
     // ---- ModRM decode (16- or 32-bit addressing) ----
     auto decode_modrm = [&](Modrm& m) {
@@ -91,45 +96,45 @@ void Cpu::step() {
         m.mod = b >> 6; m.reg = (b >> 3) & 7; m.rm = b & 7;
         m.is_reg = (m.mod == 3);
         if (m.is_reg) return;
-        if (d.a32) {
+        if (a32) {
             // 32-bit addressing: 32-bit base/index regs, optional SIB, disp8/disp32.
-            uint32_t base = 0; uint16_t seg = sreg[DS];
+            uint32_t base = 0; int seg = DS;
             if (m.rm == 4) {                       // SIB byte
                 uint8_t sib = fetch8();
                 int scale = sib >> 6, index = (sib >> 3) & 7, bs = sib & 7;
                 if (index != 4) base += gd(index) << scale;
                 if (bs == 5 && m.mod == 0) { base += fetch32(); }
-                else { base += gd(bs); if (bs == 4 || bs == 5) seg = sreg[SS]; }
+                else { base += gd(bs); if (bs == 4 || bs == 5) seg = SS; }
             } else if (m.rm == 5 && m.mod == 0) {  // [disp32]
                 base = fetch32();
             } else {
                 base = gd(m.rm);
-                if (m.rm == 5) seg = sreg[SS];     // EBP-relative → SS
+                if (m.rm == 5) seg = SS;           // EBP-relative → SS
             }
             if (m.mod == 1) base += static_cast<int32_t>(static_cast<int8_t>(fetch8()));
             else if (m.mod == 2) base += static_cast<int32_t>(fetch32());
-            m.seg = d.have_ovr ? d.seg_ovr : seg;
+            m.seg_idx = d.have_ovr ? d.seg_ovr_idx : seg;
             m.off = base;
         } else {
-            uint16_t base = 0, seg = sreg[DS];
+            uint16_t base = 0; int seg = DS;
             switch (m.rm) {
                 case 0: base = r[BX] + r[SI]; break;
                 case 1: base = r[BX] + r[DI]; break;
-                case 2: base = r[BP] + r[SI]; seg = sreg[SS]; break;
-                case 3: base = r[BP] + r[DI]; seg = sreg[SS]; break;
+                case 2: base = r[BP] + r[SI]; seg = SS; break;
+                case 3: base = r[BP] + r[DI]; seg = SS; break;
                 case 4: base = r[SI]; break;
                 case 5: base = r[DI]; break;
-                case 6: if (m.mod == 0) { base = fetch16(); } else { base = r[BP]; seg = sreg[SS]; } break;
+                case 6: if (m.mod == 0) { base = fetch16(); } else { base = r[BP]; seg = SS; } break;
                 case 7: base = r[BX]; break;
             }
             if (m.mod == 1) base += static_cast<int16_t>(static_cast<int8_t>(fetch8()));
             else if (m.mod == 2) base += fetch16();
-            m.seg = d.have_ovr ? d.seg_ovr : seg;
+            m.seg_idx = d.have_ovr ? d.seg_ovr_idx : seg;
             m.off = base;
         }
     };
 
-    auto pa = [&](const Modrm& m) -> uint32_t { return (static_cast<uint32_t>(m.seg) << 4) + m.off; };
+    auto pa = [&](const Modrm& m) -> uint32_t { return lin(m.seg_idx, m.off); };
 
     // byte operand read/write via a decoded ModRM
     auto r8m  = [&](const Modrm& m) -> uint8_t  { return m.is_reg ? gb(m.rm) : mem_.r8(pa(m)); };
@@ -271,12 +276,12 @@ void Cpu::step() {
                 else { sd(AX, 0x0400); sd(BX, 0); sd(CX, 0); sd(DX, 0x00000011); }  // FPU + VME
                 break;
             case 0xA0: pushV(sreg[FS]); break;
-            case 0xA1: sreg[FS] = static_cast<uint16_t>(popV()); break;
+            case 0xA1: set_seg(FS, static_cast<uint16_t>(popV())); break;
             case 0xA8: pushV(sreg[GS]); break;
-            case 0xA9: sreg[GS] = static_cast<uint16_t>(popV()); break;
-            case 0xB2: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); sreg[SS] = mem_.r16(pa(m) + (o32 ? 4 : 2)); break; }  // LSS
-            case 0xB4: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); sreg[FS] = mem_.r16(pa(m) + (o32 ? 4 : 2)); break; }  // LFS
-            case 0xB5: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); sreg[GS] = mem_.r16(pa(m) + (o32 ? 4 : 2)); break; }  // LGS
+            case 0xA9: set_seg(GS, static_cast<uint16_t>(popV())); break;
+            case 0xB2: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(SS, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }  // LSS
+            case 0xB4: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(FS, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }  // LFS
+            case 0xB5: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(GS, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }  // LGS
             case 0xB6: { Modrm m; decode_modrm(m); srw(m.reg, r8m(m)); break; }                       // MOVZX r, rm8
             case 0xB7: { Modrm m; decode_modrm(m); srw(m.reg, m.is_reg ? r[m.rm] : mem_.r16(pa(m))); break; }  // MOVZX r, rm16
             case 0xBE: { Modrm m; decode_modrm(m); srw(m.reg, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(r8m(m))))); break; }   // MOVSX r, rm8
@@ -350,12 +355,12 @@ void Cpu::step() {
 
         // PUSH/POP segment and general regs
         case 0x06: pushV(sreg[ES]); break;
-        case 0x07: sreg[ES] = static_cast<uint16_t>(popV()); break;
+        case 0x07: set_seg(ES, static_cast<uint16_t>(popV())); break;
         case 0x0E: pushV(sreg[CS]); break;
         case 0x16: pushV(sreg[SS]); break;
-        case 0x17: sreg[SS] = static_cast<uint16_t>(popV()); break;
+        case 0x17: set_seg(SS, static_cast<uint16_t>(popV())); break;
         case 0x1E: pushV(sreg[DS]); break;
-        case 0x1F: sreg[DS] = static_cast<uint16_t>(popV()); break;
+        case 0x1F: set_seg(DS, static_cast<uint16_t>(popV())); break;
         case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
             pushV(grw(op & 7)); break;
         case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F:
@@ -409,7 +414,7 @@ void Cpu::step() {
         case 0x8C: { Modrm m; decode_modrm(m);   // MOV rm, sreg
             if (m.is_reg) { if (o32) sd(m.rm, sreg[m.reg]); else r[m.rm] = sreg[m.reg]; } else mem_.w16(pa(m), sreg[m.reg]); break; }
         case 0x8D: { Modrm m; decode_modrm(m); srw(m.reg, m.off); break; }           // LEA
-        case 0x8E: { Modrm m; decode_modrm(m); sreg[m.reg] = m.is_reg ? r[m.rm] : mem_.r16(pa(m)); break; }  // MOV sreg, rm
+        case 0x8E: { Modrm m; decode_modrm(m); set_seg(m.reg, m.is_reg ? r[m.rm] : mem_.r16(pa(m))); break; }  // MOV sreg, rm
         case 0x8F: { Modrm m; decode_modrm(m); wvm(m, popV()); break; }              // POP rm
 
         case 0x90: break;   // NOP (XCHG AX,AX)
@@ -425,39 +430,40 @@ void Cpu::step() {
         case 0x9F: r[AX] = (r[AX] & 0x00FF) | ((flags & 0xFF) << 8); break;         // LAHF
 
         // MOV AL/eAX <-> moffs
-        case 0xA0: { uint32_t o = d.a32 ? fetch32() : fetch16(); sb(AX, mem_.r8((static_cast<uint32_t>(d.have_ovr ? d.seg_ovr : sreg[DS]) << 4) + o)); break; }
-        case 0xA1: { uint32_t o = d.a32 ? fetch32() : fetch16(); uint32_t base = (static_cast<uint32_t>(d.have_ovr ? d.seg_ovr : sreg[DS]) << 4) + o; srw(AX, o32 ? mem_.r32(base) : mem_.r16(base)); break; }
-        case 0xA2: { uint32_t o = d.a32 ? fetch32() : fetch16(); mem_.w8((static_cast<uint32_t>(d.have_ovr ? d.seg_ovr : sreg[DS]) << 4) + o, gb(AX)); break; }
-        case 0xA3: { uint32_t o = d.a32 ? fetch32() : fetch16(); uint32_t base = (static_cast<uint32_t>(d.have_ovr ? d.seg_ovr : sreg[DS]) << 4) + o; if (o32) mem_.w32(base, gd(AX)); else mem_.w16(base, r[AX]); break; }
+        case 0xA0: { uint32_t o = a32 ? fetch32() : fetch16(); int si = d.have_ovr ? d.seg_ovr_idx : DS; sb(AX, mem_.r8(lin(si, o))); break; }
+        case 0xA1: { uint32_t o = a32 ? fetch32() : fetch16(); int si = d.have_ovr ? d.seg_ovr_idx : DS; uint32_t base = lin(si, o); srw(AX, o32 ? mem_.r32(base) : mem_.r16(base)); break; }
+        case 0xA2: { uint32_t o = a32 ? fetch32() : fetch16(); int si = d.have_ovr ? d.seg_ovr_idx : DS; mem_.w8(lin(si, o), gb(AX)); break; }
+        case 0xA3: { uint32_t o = a32 ? fetch32() : fetch16(); int si = d.have_ovr ? d.seg_ovr_idx : DS; uint32_t base = lin(si, o); if (o32) mem_.w32(base, gd(AX)); else mem_.w16(base, r[AX]); break; }
         // TEST AL/eAX, imm
         case 0xA8: alu8(4, gb(AX), fetch8()); break;
         case 0xA9: aluv(4, grw(AX), fetchImmV()); break;
 
-        // String ops
+        // String ops (address size selects SI/DI/CX vs ESI/EDI/ECX)
         case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xA6: case 0xA7: case 0xAE: case 0xAF: {
             bool word = op & 1; int w = word ? (o32 ? 4 : 2) : 1; int delta = get_flag(DF) ? -w : w;
-            uint16_t dseg = d.have_ovr ? d.seg_ovr : sreg[DS];
-            auto rdw = [&](uint16_t s, uint16_t o2) -> uint32_t { return word ? (o32 ? mem_.rd(s, o2) : mem_.rw(s, o2)) : mem_.rb(s, o2); };
-            auto wrw = [&](uint16_t s, uint16_t o2, uint32_t v) { if (!word) mem_.wb(s, o2, static_cast<uint8_t>(v)); else if (o32) mem_.wd(s, o2, v); else mem_.ww(s, o2, static_cast<uint16_t>(v)); };
+            int dsi = d.have_ovr ? d.seg_ovr_idx : DS;
+            auto getSI = [&]() -> uint32_t { return a32 ? gd(SI) : r[SI]; };
+            auto getDI = [&]() -> uint32_t { return a32 ? gd(DI) : r[DI]; };
+            auto addSI = [&](int dl) { if (a32) sd(SI, gd(SI) + dl); else r[SI] += dl; };
+            auto addDI = [&](int dl) { if (a32) sd(DI, gd(DI) + dl); else r[DI] += dl; };
+            auto rdsrc = [&]() -> uint32_t { uint32_t a = lin(dsi, getSI()); return word ? (o32 ? mem_.r32(a) : mem_.r16(a)) : mem_.r8(a); };
+            auto rddst = [&]() -> uint32_t { uint32_t a = lin(ES, getDI()); return word ? (o32 ? mem_.r32(a) : mem_.r16(a)) : mem_.r8(a); };
+            auto wrdst = [&](uint32_t v) { uint32_t a = lin(ES, getDI()); if (!word) mem_.w8(a, static_cast<uint8_t>(v)); else if (o32) mem_.w32(a, v); else mem_.w16(a, static_cast<uint16_t>(v)); };
             auto once = [&]() {
                 switch (op & 0xFE) {
-                    case 0xA4: wrw(sreg[ES], r[DI], rdw(dseg, r[SI])); r[SI] += delta; r[DI] += delta; break;   // MOVS
-                    case 0xAA: wrw(sreg[ES], r[DI], grw(AX)); r[DI] += delta; break;                            // STOS
-                    case 0xAC: srw(AX, rdw(dseg, r[SI])); r[SI] += delta; break;                                // LODS
-                    case 0xA6: aluv(7, rdw(dseg, r[SI]), rdw(sreg[ES], r[DI])); r[SI] += delta; r[DI] += delta; break;   // CMPS (word)
-                    case 0xAE: aluv(7, grw(AX), rdw(sreg[ES], r[DI])); r[DI] += delta; break;                   // SCAS (word)
+                    case 0xA4: wrdst(rdsrc()); addSI(delta); addDI(delta); break;                                    // MOVS
+                    case 0xAA: wrdst(grw(AX)); addDI(delta); break;                                                  // STOS
+                    case 0xAC: srw(AX, rdsrc()); addSI(delta); break;                                                // LODS
+                    case 0xA6: { uint32_t s = rdsrc(), t = rddst(); if (word) aluv(7, s, t); else alu8(7, s, t); addSI(delta); addDI(delta); break; }  // CMPS
+                    case 0xAE: { uint32_t t = rddst(); if (word) aluv(7, grw(AX), t); else alu8(7, gb(AX), t); addDI(delta); break; }                  // SCAS
                 }
             };
-            // byte forms of CMPS/SCAS must set flags at byte width
-            auto once_b = [&]() {
-                if ((op & 0xFE) == 0xA6) { alu8(7, mem_.rb(dseg, r[SI]), mem_.rb(sreg[ES], r[DI])); r[SI] += delta; r[DI] += delta; }
-                else { alu8(7, gb(AX), mem_.rb(sreg[ES], r[DI])); r[DI] += delta; }
-            };
             bool cmp = (op & 0xFE) == 0xA6 || (op & 0xFE) == 0xAE;
-            auto step_once = [&]() { if (cmp && !word) once_b(); else once(); };
             if (rep) {
-                while (r[CX]) { --r[CX]; step_once(); if (cmp) { bool z = get_flag(ZF); if (rep == 0xF3 && !z) break; if (rep == 0xF2 && z) break; } }
-            } else step_once();
+                auto getCX = [&]() -> uint32_t { return a32 ? gd(CX) : r[CX]; };
+                auto decCX = [&]() { if (a32) sd(CX, gd(CX) - 1); else --r[CX]; };
+                while (getCX()) { decCX(); once(); if (cmp) { bool z = get_flag(ZF); if (rep == 0xF3 && !z) break; if (rep == 0xF2 && z) break; } }
+            } else once();
             break;
         }
 
@@ -494,11 +500,11 @@ void Cpu::step() {
         }
 
         // RET / RET imm16 (near)
-        case 0xC2: { uint16_t n = fetch16(); ip = pop16(); r[SP] += n; break; }
-        case 0xC3: ip = pop16(); break;
+        case 0xC2: { uint16_t n = fetch16(); ip = popV(); sp_set(sp_get() + n); break; }
+        case 0xC3: ip = popV(); break;
         // LES / LDS
-        case 0xC4: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); sreg[ES] = mem_.r16(pa(m) + (o32 ? 4 : 2)); break; }
-        case 0xC5: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); sreg[DS] = mem_.r16(pa(m) + (o32 ? 4 : 2)); break; }
+        case 0xC4: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(ES, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }
+        case 0xC5: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(DS, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }
         // MOV rm, imm
         case 0xC6: { Modrm m; decode_modrm(m); w8m(m, fetch8()); break; }
         case 0xC7: { Modrm m; decode_modrm(m); wvm(m, fetchImmV()); break; }
@@ -510,20 +516,20 @@ void Cpu::step() {
             srw(BP, fp); srw(SP, grw(SP) - frame); break; }
         case 0xC9: { srw(SP, grw(BP)); srw(BP, popV()); break; }                    // LEAVE
         // RET far
-        case 0xCA: { uint16_t n = fetch16(); ip = pop16(); sreg[CS] = pop16(); r[SP] += n; break; }
-        case 0xCB: { ip = pop16(); sreg[CS] = pop16(); break; }
+        case 0xCA: { uint16_t n = fetch16(); ip = popV(); set_seg(CS, static_cast<uint16_t>(popV())); sp_set(sp_get() + n); break; }
+        case 0xCB: { ip = popV(); set_seg(CS, static_cast<uint16_t>(popV())); break; }
         // INT
         case 0xCC: interrupt(3); break;
         case 0xCD: { uint8_t n = fetch8(); interrupt(n); break; }
         case 0xCE: if (get_flag(OF)) interrupt(4); break;
-        case 0xCF: { ip = pop16(); sreg[CS] = pop16(); flags = pop16() | 0x0002; break; }   // IRET
+        case 0xCF: { ip = popV(); set_seg(CS, static_cast<uint16_t>(popV())); flags = (popV() & 0xFFFF) | 0x0002; break; }   // IRET
 
         // CALL / JMP
         case 0xE8: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); pushV(ip); ip += rel; break; }   // CALL near rel
         case 0xE9: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); ip += rel; break; }              // JMP near rel
-        case 0xEA: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); ip = static_cast<uint16_t>(no); sreg[CS] = ns; break; }             // JMP far
+        case 0xEA: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); ip = no; set_seg(CS, ns); break; }                                 // JMP far
         case 0xEB: { int8_t rel = static_cast<int8_t>(fetch8()); ip += rel; break; }                                                        // JMP short
-        case 0x9A: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); push16(sreg[CS]); push16(ip); ip = static_cast<uint16_t>(no); sreg[CS] = ns; break; }  // CALL far
+        case 0x9A: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); pushV(sreg[CS]); pushV(ip); ip = no; set_seg(CS, ns); break; }     // CALL far
 
         // LOOP / JCXZ
         case 0xE0: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0 && !get_flag(ZF)) ip += rel; break; }  // LOOPNZ
@@ -584,10 +590,10 @@ void Cpu::step() {
             switch (m.reg) {
                 case 0: wvm(m, aluv(0, rvm(m), 1)); set_flag(CF, c); break;   // INC
                 case 1: wvm(m, aluv(5, rvm(m), 1)); set_flag(CF, c); break;   // DEC
-                case 2: pushV(ip); ip = static_cast<uint16_t>(rvm(m)); break; // CALL near rm
-                case 3: { uint16_t no = mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + 2); push16(sreg[CS]); push16(ip); ip = no; sreg[CS] = ns; break; }  // CALL far rm
-                case 4: ip = static_cast<uint16_t>(rvm(m)); break;           // JMP near rm
-                case 5: { uint16_t no = mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + 2); ip = no; sreg[CS] = ns; break; }  // JMP far rm
+                case 2: pushV(ip); ip = rvm(m); break;                       // CALL near rm
+                case 3: { uint32_t no = o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + (o32 ? 4 : 2)); pushV(sreg[CS]); pushV(ip); ip = no; set_seg(CS, ns); break; }  // CALL far rm
+                case 4: ip = rvm(m); break;                                 // JMP near rm
+                case 5: { uint32_t no = o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + (o32 ? 4 : 2)); ip = no; set_seg(CS, ns); break; }  // JMP far rm
                 case 6: pushV(rvm(m)); break;                               // PUSH rm
             } break; }
 

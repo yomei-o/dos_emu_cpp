@@ -60,7 +60,59 @@ all the way through their real-mode setup and stop exactly at the DPMI check —
 DJGPP prints `no DPMI - Get csdpmi*b.zip`, DOS/4GW prints `Can't run DOS/4G(W)`.
 The old `0x66` fault is gone. So the CPU is ready; what's missing is the mode switch.
 
-### TODO — protected mode + built-in DPMI host (the next milestone)
+### IN PROGRESS — protected mode + DPMI (branch `wip-pmode-dpmi`, has a regression)
+
+The protected-mode CPU groundwork is written but **breaks the LSI C regression** and
+is parked on branch `wip-pmode-dpmi` (main stays green at the 386-core commit). Pick
+up here. What the branch changes (src/cpu.h, src/cpu.cpp, src/memory.h only):
+
+- **Memory → 16 MiB** (`memory.h`): `kSize=0x1000000`, `kMask`; low 1 MiB is real
+  mode, above is extended (protected-mode linear). `phys()` still masks real mode to
+  1 MiB. `rd`/`wd` seg:off helpers added.
+- **`ip` widened to 32-bit**; `sreg[6]` (FS/GS); descriptor cache `sbase[6]`,
+  `slimit[6]`, `cs_d`/`ss_d`; system regs `cr[]`,`dr[]`,`gdt_*`,`idt_*`,`ldt_base`,
+  `ldtr`,`tr`. `pe()`, `lin(seg,off)` (real mode wraps at 1 MiB exactly as before;
+  PE uses `sbase+off`), `set_seg()` (loads a GDT/LDT descriptor in PE, `sel<<4` in
+  real mode), stack-size-aware `sp_get/sp_set`/push/pop, `on_pm_switch`/`pm_switch_addr`
+  hook (reaching that linear addr runs the DPMI mode switch instead of an instruction).
+- **`cpu.cpp`**: ModRM now yields a segment *index* (`seg_idx`) and `pa()=lin()`;
+  all segment loads/far transfers go through `set_seg`; string ops/moffs are
+  address-size aware; effective `o32/a32 = prefix ^ cs_d`.
+
+**The regression (must fix before continuing):** native `LCC.EXE PROG.C` fails with
+`cg: can't open: 2.$$$`. Root cause traced precisely:
+- The pass chain is CPP → CF → CG86 (all EXEC'd, **all load at CS=0x3010**, one at a
+  time — so a naive "CS==0x3010" trace catches CPP, which *works*; you must gate the
+  trace on CF specifically).
+- CPP runs fine (writes `1.$$$`). **CF runs ~640 instructions then crashes**: a
+  `E8` near-CALL at `3010:0321` jumps to `3010:9708`, which is **all zeros** in this
+  build but holds code in the working (386-core) build. CF then marches through zero
+  memory and dies. So somewhere in CF's first 640 instructions the refactor either
+  (a) mis-addresses a memory *write* that zeroes code at CS:0x9708, or (b) takes a
+  wrong branch (bad flags) reaching a corrupt `E8`. CPP's first 300 instructions are
+  byte-identical old-vs-new, so it's subtle and CF-specific.
+
+**Fastest way to find it (harness recipe):** add `bool dbg` to `Cpu`, print
+`CS:IP op regs` at the top of `step()` when `dbg`, and in `Dos::exec` set
+`cpu_.dbg=true` while `name.find("cf.exe")!=npos` (gate on `getenv("TE")`). Build the
+**working** tree too (`git stash` / checkout the 386-core `cpu.*`+`memory.h`, keep the
+same dbg hook) as `dosemu_old.exe`. Run both `TE=1 ... LCC.EXE PROG.C 2>trace`, grep
+`^3010:`, and `diff` the two CF traces — the **first differing line** is the buggy
+opcode. (Watch the shell: cp932/heredoc mangles C string escapes; use the Edit tool,
+not python heredocs, to patch the trace into committed files.)
+
+**Prime suspects** (real-mode reductions of the refactor that could still be wrong):
+`set_seg` side effects on far RET/CALL; `sp_get/sp_set` vs the old `r[SP]-=2`; a
+`seg_idx` defaulting to the wrong segment on some ModRM form (writes going to CS/ES
+instead of DS/SS → would zero code); `lin()` masking; or an `aluv`/flags edge that
+flips a `Jcc`. Test target after any fix: `LCC.EXE PROG.C` → run, and
+`node web/test_shell.mjs`.
+
+Scratch fixtures (gitignored): `scratch_root/` = a drive with `LSIC86/`, `PROG.C`,
+`COMMAND.COM`; build with `cc.sh ... -Fe:dosemu.exe`; run
+`./dosemu.exe --root scratch_root scratch_root/LSIC86/BIN/LCC.EXE PROG.C`.
+
+### TODO — after the regression is fixed: the DPMI host
 
 1. **Bigger address space.** `Memory` is 1 MiB flat. Protected-mode flat clients
    address many MB. Add extended RAM (e.g. 16 MB) reachable by *physical* 32-bit
