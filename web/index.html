@@ -3,38 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dos_emu_cpp — compile & run C with a 1993 DOS compiler, in your browser</title>
+<title>dos_emu_cpp — a DOS prompt that compiles C with LSI C-86, in your browser</title>
 <style>
   :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#c9d1d9; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --err:#f85149; }
   * { box-sizing: border-box; }
   body { margin:0; padding:24px 16px 48px; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; }
-  main { max-width: 860px; margin: 0 auto; }
+  main { max-width: 880px; margin: 0 auto; }
   h1 { font-size:1.4rem; margin:0 0 4px; } h1 code { color:var(--accent); font-size:.9em; }
   .sub { color:var(--dim); margin:0 0 20px; } .sub a { color:var(--accent); }
   .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px; }
   h2 { font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:0 0 10px; font-weight:600; }
-  textarea { width:100%; min-height:220px; background:#010409; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:10px 12px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; resize:vertical; }
-  button { font:inherit; font-size:.9rem; background:#238636; border:1px solid #2ea043; color:#fff; border-radius:6px; padding:8px 16px; cursor:pointer; }
-  button:disabled { opacity:.5; cursor:default; }
-  #term { background:#010409; border:1px solid var(--border); border-radius:8px; padding:12px 14px; min-height:150px; max-height:45vh; overflow:auto; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-word; }
-  #term .err { color:var(--err); } #term .ok { color:var(--ok); } #term .note { color:var(--dim); }
+  textarea { width:100%; min-height:180px; background:#010409; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:10px 12px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; resize:vertical; }
+  button { font:inherit; font-size:.85rem; background:#21262d; border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:5px 12px; cursor:pointer; }
+  button:hover:not(:disabled){ border-color:#8b949e; } button:disabled { opacity:.5; cursor:default; }
+  #term { background:#010409; border:1px solid var(--border); border-radius:8px 8px 0 0; border-bottom:0; padding:12px 14px; height:280px; overflow:auto; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-word; }
+  #term .err{color:var(--err);} #term .ok{color:var(--ok);} #term .note{color:var(--dim);} #term .cmd{color:var(--accent);}
+  .promptrow { display:flex; align-items:center; gap:6px; background:#010409; border:1px solid var(--border); border-radius:0 0 8px 8px; padding:6px 12px; }
+  .promptrow .ps { color:var(--ok); font:13px ui-monospace,Menlo,Consolas,monospace; white-space:pre; }
+  #cmd { flex:1; background:transparent; border:0; outline:0; color:var(--fg); font:13px ui-monospace,Menlo,Consolas,monospace; }
   #status { margin-top:8px; font-size:.8rem; color:var(--dim); }
   footer { color:var(--dim); font-size:.8rem; margin-top:20px; } footer a { color:var(--accent); }
+  .hint { color:var(--dim); font-size:.8rem; margin:8px 0 0; } .hint code{color:var(--accent);}
 </style>
 </head>
 <body>
 <main>
-  <h1>Compile &amp; run C with <code>LSI&nbsp;C-86</code> — in your browser</h1>
+  <h1>A DOS prompt that compiles C with <code>LSI&nbsp;C-86</code></h1>
   <p class="sub">
     <a href="https://github.com/yomei-o/dos_emu_cpp">dos_emu_cpp</a> is a 16-bit MS-DOS
-    emulator in C++/WebAssembly. This page runs the real <b>LSI C-86 3.30</b> (a 1993
-    DOS C compiler) inside it: it compiles the C below — the driver spawns its passes
-    <code>CPP→CF→CG86→R86→LLD</code> as DOS programs — into a DOS <code>.EXE</code>, then
-    runs that <code>.EXE</code>. Nothing leaves your browser.
+    emulator in C++/WebAssembly. Below is the real <b>FreeDOS COMMAND.COM</b> running inside
+    it. Type a command and it dispatches it like DOS — e.g. run the 1993 <b>LSI C-86</b>
+    compiler on the C in the editor, then run the <code>.EXE</code> it produces. Nothing
+    leaves your browser.
   </p>
 
   <div class="panel">
-    <h2>program.c</h2>
+    <h2>A:\PROG.C  <span style="text-transform:none;font-weight:400">(edited live; saved before each command)</span></h2>
     <textarea id="code" spellcheck="false">#include &lt;stdio.h&gt;
 
 int main(void)
@@ -42,73 +46,79 @@ int main(void)
     int i, sum = 0;
     for (i = 1; i <= 10; i++)
         sum += i;
-    printf("LSI C-86 says: 1+..+10 = %d\n", sum);
+    printf("LSI C-86 on FreeDOS: 1+..+10 = %d\n", sum);
     return 0;
 }
 </textarea>
-    <div style="margin-top:10px"><button id="run" disabled>Compile &amp; Run</button></div>
+    <div class="hint">At the prompt try: <code>lcc prog.c</code> &nbsp;then&nbsp; <code>prog</code></div>
   </div>
 
   <div class="panel">
-    <h2>output</h2>
+    <h2>FreeDOS prompt</h2>
     <div id="term"></div>
-    <div id="status">loading the emulator and the compiler…</div>
+    <div class="promptrow"><span class="ps" id="ps">A:\&gt;</span><input id="cmd" autocomplete="off" spellcheck="false" disabled></div>
+    <div id="status">loading the emulator, COMMAND.COM and the compiler…</div>
   </div>
 
-  <footer>16-bit real-mode 8086 interpreter + a DOS (INT 21h) personality, including
-    program EXEC so the compiler's multi-pass pipeline runs. Text-mode BIOS video is not
-    modelled — console I/O only. See the <a href="https://github.com/yomei-o/dos_emu_cpp">README</a>.</footer>
+  <footer>Each line runs as <code>COMMAND.COM /C &lt;command&gt;</code> — a real FreeCOM
+    dispatch (PATH search, EXEC of external programs; the compiler's passes run as nested
+    DOS programs). External commands work; some FreeCOM internals and full interactive
+    line-editing are still being brought up. See the
+    <a href="https://github.com/yomei-o/dos_emu_cpp">README</a>.</footer>
 </main>
 
 <script src="dosemu.js"></script>
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
-  const term = $('term'), statusEl = $('status'), runBtn = $('run');
+  const term = $('term'), statusEl = $('status'), cmdEl = $('cmd');
   const dec = new TextDecoder('utf-8', { fatal: false });
   let M = null, busy = false;
 
   function append(text, cls) { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text; term.appendChild(s); term.scrollTop = term.scrollHeight; }
   globalThis.dosemuOutput = (fd, bytes) => append(dec.decode(bytes, { stream: true }).replace(/\r\n?/g, '\n'), fd === 2 ? 'err' : null);
-  globalThis.dosemuLog = (m) => append('[emu] ' + m + '\n', 'note');
+  globalThis.dosemuLog = () => {};
 
-  async function gunzip(u8) { const ds = new DecompressionStream('gzip'); return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(ds)).arrayBuffer()); }
-  function untar(buf) { const out = []; const s = (o,n)=>{let r='';for(let i=0;i<n&&buf[o+i];i++)r+=String.fromCharCode(buf[o+i]);return r;};
-    for (let o=0;o+512<=buf.length;) { let name=s(o,100); if(!name)break; const pre=s(o+345,155); if(pre)name=pre+'/'+name;
+  async function gunzip(u8){ const ds=new DecompressionStream('gzip'); return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(ds)).arrayBuffer()); }
+  function untar(buf){ const out=[]; const s=(o,n)=>{let r='';for(let i=0;i<n&&buf[o+i];i++)r+=String.fromCharCode(buf[o+i]);return r;};
+    for(let o=0;o+512<=buf.length;){ let name=s(o,100); if(!name)break; const pre=s(o+345,155); if(pre)name=pre+'/'+name;
       let sz=0; for(let i=0;i<11&&buf[o+124+i];i++)sz=sz*8+(buf[o+124+i]-48); const t=buf[o+156]; o+=512;
       if(t===0x30||t===0) out.push({name:name.replace(/^\.\//,''),bytes:buf.subarray(o,o+sz)}); o+=Math.ceil(sz/512)*512; } return out; }
-  const mkdirp = (p) => { let c=''; for (const s of p.split('/').filter(Boolean)) { c+='/'+s; try { M.FS.mkdir(c); } catch {} } };
+  const mkdirp=(p)=>{ let c=''; for(const s of p.split('/').filter(Boolean)){ c+='/'+s; try{M.FS.mkdir(c);}catch{} } };
 
   async function boot() {
     M = await createDosemu();
-    statusEl.textContent = 'downloading the LSI C-86 compiler…';
-    const lsic = untar(await gunzip(new Uint8Array(await (await fetch('lsic.tar.gz')).arrayBuffer())));
+    statusEl.textContent = 'downloading FreeDOS COMMAND.COM + LSI C-86…';
+    const dos = untar(await gunzip(new Uint8Array(await (await fetch('lsic.tar.gz')).arrayBuffer())));
     mkdirp('/dos');
-    for (const f of lsic) { const full = '/dos/' + f.name; const sl = full.lastIndexOf('/'); if (sl>0) mkdirp(full.slice(0, sl)); M.FS.writeFile(full, f.bytes); }
-    statusEl.textContent = 'ready — edit the C and press Compile & Run.';
-    runBtn.disabled = false;
+    for (const f of dos) { const full='/dos/'+f.name; const sl=full.lastIndexOf('/'); if(sl>0)mkdirp(full.slice(0,sl)); M.FS.writeFile(full, f.bytes); }
+    append('dos_emu_cpp — FreeDOS COMMAND.COM ready.\nA:\\LSIC86 has the LSI C-86 compiler on the PATH.\n\n', 'note');
+    statusEl.textContent = 'ready — type a command and press Enter.';
+    cmdEl.disabled = false; cmdEl.focus();
   }
 
-  const run = (prog, tail) => M.ccall('dosemu_run', 'number', ['string','string','string'], [prog, '/dos', tail]);
-  function exists(p) { try { return M.FS.analyzePath(p).exists; } catch { return false; } }
+  function runCommand(line) {
+    if (busy || !M) return;
+    busy = true; cmdEl.disabled = true;
+    append('A:\\>' + line + '\n', 'cmd');
+    // Save the editor to A:\PROG.C so `lcc prog.c` picks up live edits.
+    try { M.FS.writeFile('/dos/PROG.C', $('code').value); } catch {}
+    statusEl.textContent = 'running…';
+    setTimeout(() => {
+      try {
+        M.ccall('dosemu_run', 'number', ['string','string','string'], ['/dos/COMMAND.COM', '/dos', '/C ' + line]);
+      } catch (e) { append('\nemu error: ' + e.message + '\n', 'err'); }
+      append('\n');
+      statusEl.textContent = 'ready.';
+      busy = false; cmdEl.disabled = false; cmdEl.focus();
+    }, 20);
+  }
 
-  runBtn.addEventListener('click', async () => {
-    if (busy) return; busy = true; runBtn.disabled = true; term.textContent = '';
-    try {
-      // fresh source; clear any previous output binary
-      for (const p of ['/dos/PROG.exe','/dos/PROG.EXE']) if (exists(p)) M.FS.unlink(p);
-      M.FS.writeFile('/dos/PROG.C', $('code').value);
-      append('A> lcc PROG.C\n', 'note'); statusEl.textContent = 'compiling…';
-      await new Promise(r => setTimeout(r, 20));
-      const crc = run('/dos/LSIC86/BIN/LCC.EXE', 'PROG.C');
-      const exe = exists('/dos/PROG.exe') ? '/dos/PROG.exe' : exists('/dos/PROG.EXE') ? '/dos/PROG.EXE' : null;
-      if (crc !== 0 || !exe) { append('\n[compile failed]\n', 'err'); statusEl.textContent = 'compile failed'; return; }
-      append('\nA> PROG\n', 'note'); statusEl.textContent = 'running…';
-      await new Promise(r => setTimeout(r, 20));
-      const rrc = run(exe, '');
-      append(`\n[exit ${rrc}]\n`, 'ok'); statusEl.textContent = 'done.';
-    } catch (e) { append('\nerror: ' + e.message + '\n', 'err'); }
-    finally { busy = false; runBtn.disabled = false; }
+  const history = []; let hi = 0;
+  cmdEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { const v = cmdEl.value.trim(); cmdEl.value=''; if (v) { history.push(v); hi = history.length; runCommand(v); } }
+    else if (e.key === 'ArrowUp') { if (hi>0) cmdEl.value = history[--hi]; e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { if (hi<history.length-1) cmdEl.value = history[++hi]; else { hi=history.length; cmdEl.value=''; } e.preventDefault(); }
   });
 
   boot().catch(e => { statusEl.textContent = 'failed to load: ' + e.message; });
