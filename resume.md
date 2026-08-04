@@ -16,8 +16,10 @@ Working notes for picking the project back up. The README says what the emulator
 > 2. **The Watcom linker**, if it is worth it. DOS/4GW runs its whole startup, hooks INT
 >    21h and INT 31h, reflects DOS calls through INT 31h **0302h** (implemented now), and
 >    its output reaches the console. It still exits 8, and the message it is trying to
->    print — `DOS/16M error: ...` — comes out as its own saved interrupt-vector table,
->    because DOS/4GW writes that table over its own message strings. **No DPMI function
+>    print — `DOS/16M error: ...` — comes out as saved interrupt-vector records, because
+>    the write reads through DS = 0x003F rather than the paragraph the frame's selector
+>    aliases. A watchpoint shows the strings intact and never written to, so this is a dozen
+>    lines of our own `load_frame()` and not a mystery. **No DPMI function
 >    fails any more** bar `0A00h`, which every client probes. So what is left is one
 >    question about DOS/4GW's internal layout, not about the host; `OPENWATCOM.md` has the
 >    hex dump and the measurements, and weighs it against writing the OMF linker

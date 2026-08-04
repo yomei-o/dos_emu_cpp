@@ -298,17 +298,23 @@ bytes, straight across the region the strings occupy in the same data segment. (
 reporting 0:0 instead, the same region comes out as `CF` filler. Either way the strings are
 gone, so this is not something our answer caused.)
 
-A watchpoint confirms the addressing is right on our side: the write reads through DS =
-paragraph 0110, base 0x1100, which is where the overlay put the image, and `set_seg` shows
-that value being loaded by `rm_call` and nothing changing it before the `INT`. So the
-strings *were* at those addresses and something overwrote them.
+Two measurements pin down where it goes wrong, and they point back at us.
 
-Which means the remaining question is not about the host at all: DOS/4GW is writing a table
-into memory it believes is scratch and which actually holds its own strings. Either its
-data segment is meant to be somewhere else by then — its code has relocated to segment
-0x5CA — or the table pointer it computes depends on something we set up differently. That
-is a question about DOS/4GW's own layout, answerable by watching where it decides the table
-goes, and it is the last thing between here and reading the error it wants to report.
+**The strings are intact when DOS/4GW measures them.** A watchpoint on the first piece
+(linear 0x1F18 = base 0x1100 + 0x0E18) fires exactly seven times, all at one instruction,
+and that instruction is a `repne scasb` — `strlen`, which returns 7. "DOS/16M" is seven
+characters. Nothing ever writes to that address.
+
+**And the write does not read it.** The same watchpoint is silent when the DOS write
+executes 168 instructions later. So the write is reading somewhere else: DS is 0x003F —
+base 0x3F0 as a paragraph — and 0x3F0 + 0x0E18 = 0x1208, which is where the saved
+interrupt-vector records live. The bytes are real, they are just not the message.
+
+So `load_frame()`'s conversion of a selector to the paragraph it aliases is *not* taking
+effect on this path, even though the trace printed after it says DS = 0110. That is a
+contradiction inside a dozen lines of our own code rather than a mystery about DOS/4GW,
+which makes it the last easy step: print the raw frame word next to what DS ends up as, and
+the disagreement resolves itself.
 
 ### Where the linker actually stands
 
