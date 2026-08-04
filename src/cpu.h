@@ -34,7 +34,10 @@ struct CpuError {
 
 class Cpu {
 public:
-    explicit Cpu(Memory& mem) : mem_(mem) {}
+    explicit Cpu(Memory& mem) : mem_(mem) {
+        // Let the memory-side half of DOSEMU_WATCH report with the same context as ours.
+        Memory::watch_write = [this](uint32_t a) { mem_write_hit(a); };
+    }
 
     uint16_t r[8] = {0};       // low 16 bits of AX,CX,DX,BX,SP,BP,SI,DI
     uint16_t rhi[8] = {0};     // upper 16 bits (EAX..EDI); 16-bit ops leave these alone
@@ -111,6 +114,7 @@ public:
     // addresses directly, and a `rep movs` is exactly the thing you end up hunting.
     static uint32_t watch_lo, watch_hi;
     void watch_hit(uint32_t a, int s, uint32_t off) const;
+    void mem_write_hit(uint32_t a) const;
     void bad_sel(int i, uint16_t sel) const;
     // A decoded GDT/LDT descriptor. `ar` is the access-rights byte (descriptor byte 5)
     // and `hi` the flags nibble (byte 6), which is what LAR reports.

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -61,14 +62,16 @@ public:
              | (static_cast<uint32_t>(r8(a + 3)) << 24);
     }
 
-    void w8(uint32_t a, uint8_t v) { page(a)[a & kPageMask] = v; }
+    void w8(uint32_t a, uint8_t v) { watched(a); page(a)[a & kPageMask] = v; }
     void w16(uint32_t a, uint16_t v) {
+        watched(a); watched(a + 1);
         if ((a & kPageMask) <= kPageMask - 1) {
             uint8_t* p = page(a) + (a & kPageMask);
             p[0] = static_cast<uint8_t>(v); p[1] = static_cast<uint8_t>(v >> 8);
         } else { w8(a, static_cast<uint8_t>(v)); w8(a + 1, static_cast<uint8_t>(v >> 8)); }
     }
     void w32(uint32_t a, uint32_t v) {
+        for (int i = 0; i < 4; ++i) watched(a + i);
         if ((a & kPageMask) <= kPageMask - 3) {
             uint8_t* p = page(a) + (a & kPageMask);
             p[0] = static_cast<uint8_t>(v);       p[1] = static_cast<uint8_t>(v >> 8);
@@ -87,6 +90,7 @@ public:
     void     wd(uint16_t s, uint16_t o, uint32_t v) { w32(phys(s, o), v); }
 
     void write(uint32_t a, const void* src, uint32_t len) {
+        if (watch_hi) for (uint32_t i = 0; i < len; ++i) watched(a + i);
         const uint8_t* s = static_cast<const uint8_t*>(src);
         while (len) {
             const uint32_t off = a & kPageMask;
@@ -101,6 +105,16 @@ public:
     // working at 256 MiB" is the kind of thing worth being told once rather than
     // discovering three days later.
     static bool check;
+
+    // DOSEMU_WATCH applies here too, for writes. The CPU's copy of the check lives in
+    // Cpu::lin() and therefore sees only accesses made through a segment register — which
+    // is not how the DOS layer addresses guest memory (Memory::rb/ww take a segment and an
+    // offset and come straight here) and not how the host writes its own structures. A
+    // watchpoint that cannot see those is worse than no watchpoint, because its silence
+    // reads as evidence: two hours went into a conclusion drawn from exactly that.
+    static uint32_t watch_lo, watch_hi;
+    static std::function<void(uint32_t)> watch_write;
+    void watched(uint32_t a) const { if (watch_hi && a >= watch_lo && a <= watch_hi && watch_write) watch_write(a); }
 
 private:
     const uint8_t* ro(uint32_t a) const { return pages_[a >> kPageBits].get(); }

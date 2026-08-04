@@ -53,6 +53,14 @@ void Cpu::watch_hit(uint32_t a, int s, uint32_t off) const {
            (unsigned long long)insns, a, s, sreg[s], sbase[s], off, sreg[CS], ip);
 }
 
+// A write reported by Memory rather than by lin(): the DOS layer, the DPMI host, or the
+// loader. Distinguished in the output because "who wrote this" and "which segment did the
+// guest use" are different questions and only one of them has an answer here.
+void Cpu::mem_write_hit(uint32_t a) const {
+    printf("[write]%llu %08X  by the host, at %04X:%08X\n",
+           (unsigned long long)insns, a, sreg[CS], ip);
+}
+
 void Cpu::bad_sel(int i, uint16_t sel) const {
     static int n = 0;
     if (++n > 8) return;
