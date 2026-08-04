@@ -166,6 +166,24 @@ public:
     void push32(uint32_t v) { sp_set(sp_get() - 4); mem_.w32(lin(SS, sp_get()), v); }
     uint32_t pop32() { uint32_t v = mem_.r32(lin(SS, sp_get())); sp_set(sp_get() + 4); return v; }
 
+    // A far transfer back out of a more privileged segment — RETF, RETF imm and IRET.
+    // Returning to a higher RPL than the current one pops the caller's SS:ESP too,
+    // because the gate that got here pushed them (see interrupt()). `drop` is RETF's
+    // immediate, released from both stacks as Intel specifies.
+    void far_ret(uint16_t sel, uint32_t off, bool wide, uint16_t drop = 0) {
+        sp_set(sp_get() + drop);
+        if (pe() && (sel & 3) > (sreg[CS] & 3)) {
+            const uint32_t nsp = wide ? pop32() : pop16();
+            const uint16_t nss = static_cast<uint16_t>(wide ? pop32() : pop16());
+            set_seg(CS, sel);
+            set_seg(SS, nss);
+            sp_set(nsp + drop);
+        } else {
+            set_seg(CS, sel);
+        }
+        jump(off);
+    }
+
     // INT n service: the handler inspects/updates registers. Return false to let
     // the CPU fall through to the (usually unused) real IVT behaviour.
     std::function<bool(uint8_t)> on_int;

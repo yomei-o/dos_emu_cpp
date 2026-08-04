@@ -158,14 +158,22 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     uint16_t spsp = psp_seg, sheap = heap_next_, senv = env_seg;
     const std::string sname = prog_path;
 
-    uint16_t child_psp = heap_next_;
-    heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
-
     // The parameter block's environment word: a segment to use as is, or 0 meaning
     // "inherit". DOS inherits by *copying* the parent's strings into a new block and
     // appending the child's own path, which is where a C runtime finds argv[0].
+    //
+    // Allocated *before* the child's own block, and that order is the point. DOS builds
+    // the environment first, so it sits below the PSP and outside the arena the child
+    // owns; we used to put it just above, which reads correctly and is still wrong. The
+    // moment a child asks `AH=4Ah` to grow into all the memory it has been told it owns
+    // — W32RUN asks for 0x6F00 paragraphs immediately — it zeroes its own environment
+    // and then cannot find the variable that says what to load. It looked like our
+    // environment block was empty; it was overwritten by its reader.
     uint16_t child_env = mem_.rw(pb_seg, pb_off);
     if (!child_env) child_env = make_child_env(senv, name);
+
+    uint16_t child_psp = heap_next_;
+    heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
 
     std::string err;
     if (!load_program(file, cpu_, child_psp, tail, err, name, child_env)) {
@@ -293,9 +301,9 @@ bool Dos::handle(uint8_t n) {
             }
             const bool r = int21();
             std::fprintf(stderr,
-                "[int21]%llu ah=%02X al=%02X bx=%04X cx=%04X dx=%04X -> %s ax=%04X bx=%04X"
+                "[int21]%llu ah=%02X al=%02X bx=%04X cx=%04X ds:dx=%04X:%04X -> %s ax=%04X bx=%04X"
                 "  at %04X:%08X\n",
-                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, dx,
+                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, cpu_.sreg[DS], dx,
                 (cpu_.flags & CF) ? "CF" : "ok", cpu_.r[AX], cpu_.r[BX],
                 cpu_.sreg[CS], cpu_.ip);
             return r;

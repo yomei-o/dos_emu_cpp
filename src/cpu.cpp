@@ -40,15 +40,17 @@ void Cpu::trace_insn(uint8_t op) const {
     char by[32] = {0};
     for (int i = 0; i < 8; ++i)
         std::snprintf(by + i * 3, 4, "%02X ", mem_.r8(lin(CS, ip - 1 + i)));
-    printf("[t]%llu %04X:%08X %s| eax=%08X ecx=%08X ebx=%08X edx=%08X esp=%08X ebp=%08X\n",
-           (unsigned long long)insns, sreg[CS], ip - 1, by,
-           gd(AX), gd(CX), gd(BX), gd(DX), gd(SP), gd(BP));
+    // The segment bases too: in protected mode an EIP means nothing without them, and
+    // guessing a base is how a trace turns into a wrong answer that looks right.
+    printf("[t]%llu %04X:%08X %s| csb=%08X dsb=%08X eax=%08X ecx=%08X ebx=%08X edx=%08X esp=%08X\n",
+           (unsigned long long)insns, sreg[CS], ip - 1, by, sbase[CS], sbase[DS],
+           gd(AX), gd(CX), gd(BX), gd(DX), gd(SP));
     (void)op;
 }
 
 void Cpu::watch_hit(uint32_t a, int s, uint32_t off) const {
-    printf("[watch] %08X  seg%d=%04X base=%08X off=%08X  at %04X:%08X\n",
-           a, s, sreg[s], sbase[s], off, sreg[CS], ip);
+    printf("[watch]%llu %08X  seg%d=%04X base=%08X off=%08X  at %04X:%08X\n",
+           (unsigned long long)insns, a, s, sreg[s], sbase[s], off, sreg[CS], ip);
 }
 
 void Cpu::bad_sel(int i, uint16_t sel) const {
@@ -124,6 +126,54 @@ struct Decode {
 void Cpu::run() { while (!halted) step(); }
 
 void Cpu::interrupt(uint8_t n) {
+    // A protected-mode guest that loaded its own IDT means it: the handler is not
+    // decoration. Watcom's X-32 extender runs under its own GDT/IDT and reflects DOS
+    // calls itself, and the code around them assumes its own handler's register
+    // discipline — `mov ebx,esp; int 21h; mov esp,ebx` only makes sense if what runs in
+    // between is yours. Servicing that as DOS returned the vector's offset in BX, which
+    // `mov esp,ebx` then made the stack pointer: a 32-bit program running on a stack at
+    // 0x24, which is how its environment scan ended up reading two NULs and quitting.
+    //
+    // A vector the guest left un-hooked still falls through to DOS below, so DPMI
+    // clients (which do not own the IDT — the host reflects for them) are untouched.
+    if (pe() && idt_limit >= static_cast<uint32_t>(n) * 8 + 7) {
+        const uint32_t g = idt_base + n * 8;
+        const uint8_t attr = mem_.r8(g + 5);
+        const uint8_t type = attr & 0x1F;
+        const bool gate32 = (type == 0x0E || type == 0x0F);   // 386 interrupt/trap gate
+        const bool gate16 = (type == 0x06 || type == 0x07);   // 286 interrupt/trap gate
+        if ((attr & 0x80) && (gate32 || gate16)) {
+            const uint16_t sel = mem_.r16(g + 2);
+            const uint32_t off = gate32
+                ? (mem_.r16(g) | (static_cast<uint32_t>(mem_.r16(g + 6)) << 16))
+                : mem_.r16(g);
+            // A gate into a more privileged segment switches to that ring's stack out
+            // of the TSS and stacks the old SS:ESP below the usual three words. X-32
+            // runs the 32-bit application at CPL 3 and its own handler at CPL 0, and
+            // relies on both halves of that: the handler's frame has to live in *its*
+            // data segment (it reloads SS from a fixed selector and expects to find the
+            // frame still there), and the five-word frame is what its closing far return
+            // consumes after shuffling it into EIP/CS/ESP/SS.
+            const uint32_t cpl = sreg[CS] & 3, target = sel & 3;
+            uint16_t old_ss = sreg[SS]; uint32_t old_sp = sp_get();
+            if (target < cpl) {
+                const uint32_t tss = read_desc(tr).base;
+                const uint32_t nsp = mem_.r32(tss + 4 + target * 8);
+                const uint16_t nss = mem_.r16(tss + 8 + target * 8);
+                set_seg(SS, nss);
+                sp_set(nsp);
+                if (gate32) { push32(old_ss); push32(old_sp); }
+                else        { push16(old_ss); push16(static_cast<uint16_t>(old_sp)); }
+            }
+            if (gate32) { push32(flags); push32(sreg[CS]); push32(ip); }
+            else        { push16(flags); push16(sreg[CS]); push16(static_cast<uint16_t>(ip)); }
+            if (type == 0x0E || type == 0x06) set_flag(IF, false);   // interrupt gate, not trap
+            set_flag(TF, false);
+            set_seg(CS, sel);
+            jump(off);
+            return;
+        }
+    }
     if (on_int && on_int(n)) return;   // serviced by DOS/BIOS layer
     // Fall back to the real interrupt vector table (rarely used by our guests).
     push16(flags);
@@ -534,7 +584,14 @@ void Cpu::step() {
             if (m.is_reg) { if (o32) sd(m.rm, sreg[m.reg]); else r[m.rm] = sreg[m.reg]; } else mem_.w16(pa(m), sreg[m.reg]); break; }
         case 0x8D: { Modrm m; decode_modrm(m); srw(m.reg, m.off); break; }           // LEA
         case 0x8E: { Modrm m; decode_modrm(m); set_seg(m.reg, m.is_reg ? r[m.rm] : mem_.r16(pa(m))); break; }  // MOV sreg, rm
-        case 0x8F: { Modrm m; decode_modrm(m); wvm(m, popV()); break; }              // POP rm
+        // POP rm — the pop happens *first*. When ESP is the base register the effective
+        // address is computed from the incremented ESP, which Intel spells out and which
+        // matters exactly once in a blue moon: X-32's interrupt handler rewrites the
+        // frame it was entered on with `pop dword [esp+8]` / `pop dword [esp]`, and
+        // computing those addresses before the pop lands CS and EIP one slot apart. Its
+        // closing 32-bit `retf` then returned to CS=<flags>:EIP=<CS> and ran off into
+        // zeroed memory — 20 million instructions of `add [bx+si],al`.
+        case 0x8F: { uint32_t v = popV(); Modrm m; decode_modrm(m); wvm(m, v); break; }
 
         case 0x90: break;   // NOP (XCHG AX,AX)
         case 0x9B: break;   // FWAIT: nothing to wait for, the FPU here is synchronous
@@ -635,14 +692,17 @@ void Cpu::step() {
             if (level) pushV(fp);
             srw(BP, fp); srw(SP, grw(SP) - frame); break; }
         case 0xC9: { srw(SP, grw(BP)); srw(BP, popV()); break; }                    // LEAVE
-        // RET far
-        case 0xCA: { uint16_t n = fetch16(); uint32_t no = popV(); set_seg(CS, static_cast<uint16_t>(popV())); jump(no); sp_set(sp_get() + n); break; }
-        case 0xCB: { uint32_t no = popV(); set_seg(CS, static_cast<uint16_t>(popV())); jump(no); break; }
+        // RET far. Returning to a less privileged segment pops the caller's stack with
+        // it — the other half of the privilege-changing gate in interrupt().
+        case 0xCA: { uint16_t n = fetch16(); uint32_t no = popV(); uint16_t ns = static_cast<uint16_t>(popV());
+                     far_ret(ns, no, o32, n); break; }
+        case 0xCB: { uint32_t no = popV(); far_ret(static_cast<uint16_t>(popV()), no, o32); break; }
         // INT
         case 0xCC: interrupt(3); break;
         case 0xCD: { uint8_t n = fetch8(); interrupt(n); break; }
         case 0xCE: if (get_flag(OF)) interrupt(4); break;
-        case 0xCF: { uint32_t no = popV(); set_seg(CS, static_cast<uint16_t>(popV())); flags = (popV() & 0xFFFF) | 0x0002; jump(no); break; }   // IRET
+        case 0xCF: { uint32_t no = popV(); uint16_t ns = static_cast<uint16_t>(popV());
+                     flags = (popV() & 0xFFFF) | 0x0002; far_ret(ns, no, o32); break; }   // IRET
 
         // CALL / JMP
         case 0xE8: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); pushV(ip); jump(ip + rel); break; }   // CALL near rel
