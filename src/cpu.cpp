@@ -404,7 +404,8 @@ void Cpu::step() {
                 switch (m.reg) {
                     case 0: mem_.w16(a, gdt_limit); mem_.w32(a + 2, gdt_base); break;   // SGDT
                     case 1: mem_.w16(a, idt_limit); mem_.w32(a + 2, idt_base); break;   // SIDT
-                    case 2: gdt_limit = mem_.r16(a); gdt_base = mem_.r32(a + 2) & (o32 ? 0xFFFFFFFF : 0xFFFFFF); break;  // LGDT
+                    case 2: gdt_limit = mem_.r16(a); gdt_base = mem_.r32(a + 2) & (o32 ? 0xFFFFFFFF : 0xFFFFFF);
+                            gdt_loaded = true; break;                                          // LGDT
                     case 3: idt_limit = mem_.r16(a); idt_base = mem_.r32(a + 2) & (o32 ? 0xFFFFFFFF : 0xFFFFFF); break;  // LIDT
                     case 4: wvm(m, cr[0] & 0xFFFF); break;                              // SMSW
                     case 6: cr[0] = (cr[0] & 0xFFFF0000u) | (rvm(m) & 0xFFFF); break;   // LMSW

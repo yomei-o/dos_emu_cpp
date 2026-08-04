@@ -49,6 +49,7 @@ public:
     uint32_t dr[8] = {0};
     uint32_t gdt_base = 0, idt_base = 0, ldt_base = 0;
     uint16_t gdt_limit = 0, idt_limit = 0;
+    bool gdt_loaded = false;   // an LGDT has actually happened
     uint16_t ldtr = 0, tr = 0;
     // Descriptor cache: base/limit per segment register, and the default-size (D/B)
     // bits for CS and SS. Maintained by set_seg(); only consulted in protected mode.
@@ -111,7 +112,13 @@ public:
     // and `hi` the flags nibble (byte 6), which is what LAR reports.
     struct Desc { uint32_t base, limit; uint8_t ar, hi; bool big, present; };
     Desc read_desc(uint16_t sel) const {
-        const uint32_t tbl = (sel & 4) ? ldt_base : gdt_base;
+        // Bit 2 picks the table — but only if there *is* a GDT. Under a DPMI host every
+        // selector is an LDT selector, the host's descriptor calls are LDT-only, and a
+        // client that loses the table bit doing selector arithmetic (DOS/4GW does, on the
+        // PSP selector) then reads descriptors out of the interrupt vector table at linear
+        // 0x18 and executes whatever the base says. With no GDT loaded there is nothing
+        // for a GDT selector to mean, so it means what the only table we have says.
+        const uint32_t tbl = (sel & 4) || !gdt_loaded ? ldt_base : gdt_base;
         const uint32_t da = tbl + (sel & ~7u);
         Desc d{};
         d.base = mem_.r16(da + 2) | (static_cast<uint32_t>(mem_.r8(da + 4)) << 16)
