@@ -842,6 +842,22 @@ void Cpu::step() {
         // 0x0F two-byte opcodes (80386+)
         case 0x0F: do_0f(); break;
 
+        // ARPL: bring the destination selector's RPL up to the source's, and say in ZF
+        // whether it had to. An operating system uses it to stop a caller from handing it a
+        // selector more privileged than the caller itself; a DOS extender validating what a
+        // client passed does the same thing. Now that clients here run at ring 3 (their
+        // selectors say so) this comes up.
+        case 0x63: { Modrm m; decode_modrm(m);
+            const uint16_t src = static_cast<uint16_t>(grw(m.reg));
+            const uint16_t dst = static_cast<uint16_t>(m.is_reg ? r[m.rm] : mem_.r16(pa(m)));
+            if ((dst & 3) < (src & 3)) {
+                const uint16_t v = static_cast<uint16_t>((dst & ~3u) | (src & 3));
+                if (m.is_reg) r[m.rm] = v; else mem_.w16(pa(m), v);
+                set_flag(ZF, true);
+            } else set_flag(ZF, false);
+            break;
+        }
+
         // XLAT: AL indexes a table at DS:(E)BX. An 8086 instruction that no guest here
         // had used until DOS/4GW, which needs it before it will print its own error
         // message — so the first symptom was an unimplemented opcode standing where the
