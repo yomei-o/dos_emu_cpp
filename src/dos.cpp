@@ -9,9 +9,9 @@
 
 namespace dosemu {
 
-// A spare paragraph below the environment block (the DPMI entry owns 0x00E0) used to
-// hand out the DOS list-of-lists. Nothing else lives between the BIOS data area and
-// the environment at 0x00F0.
+// A spare paragraph used to hand out the DOS list-of-lists, just above the DPMI entry
+// (0x00E0) and above the environment block (0x0090). 0x00FF is the arena's first MCB and
+// 0x0100 the first PSP, so this is the last free paragraph below the programs.
 static constexpr uint16_t kLolSeg = 0x00E1;
 
 bool Dos::trace = getenv("DOSEMU_DOS_TRACE") != nullptr;
@@ -55,6 +55,16 @@ static constexpr uint16_t kFixedDate = ((1993 - 1980) << 9) | (8 << 5) | 19;
 static constexpr uint16_t kFixedTime = (12 << 11);
 
 bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&, uint16_t);
+std::vector<uint8_t> make_default_env(const std::string& dos_name);
+
+uint16_t Dos::alloc_env(const std::string& dos_name) {
+    const std::vector<uint8_t> b = make_default_env(dos_name);
+    const uint16_t seg = mem_alloc(static_cast<uint16_t>((b.size() + 15) / 16));
+    if (!seg) return 0;
+    for (size_t i = 0; i < b.size(); ++i) mem_.wb(seg, static_cast<uint16_t>(i), b[i]);
+    env_seg = seg;
+    return seg;
+}
 
 // The PSP fields that depend on who launched the program and how much memory it owns.
 // build_psp() in the loader cannot fill these: it knows neither.
@@ -73,11 +83,16 @@ void Dos::init_psp(uint16_t psp, uint16_t parent, const std::string& path) {
     // claims it for the top-level program — but that claim is what makes the first
     // AH=4Ah a *shrink* rather than an allocation out of thin air.
     uint16_t top = heap_end_;
-    bool owned = false;
-    for (const Block& b : blocks_) if (b.seg == psp && b.used) {
-        owned = true; top = static_cast<uint16_t>(b.seg + b.paras); break;
+    const size_t bi = mem_find(psp);
+    if (bi != blocks_.size() && blocks_[bi].used) {
+        blocks_[bi].owner = psp;
+        top = static_cast<uint16_t>(psp + blocks_[bi].paras);
+    } else {
+        mem_own(psp, static_cast<uint16_t>(heap_end_ - psp));
+        const size_t bj = mem_find(psp);
+        if (bj != blocks_.size()) { blocks_[bj].owner = psp; top = static_cast<uint16_t>(psp + blocks_[bj].paras); }
+        mem_publish();
     }
-    if (!owned) mem_own(psp, static_cast<uint16_t>(heap_end_ - psp));
     mem_.ww(psp, 0x02, top);
     mem_.ww(psp, 0x16, parent);
     mem_.wb(psp, 0x50, 0xCD); mem_.wb(psp, 0x51, 0x21); mem_.wb(psp, 0x52, 0xCB);
@@ -140,40 +155,61 @@ uint16_t Dos::make_child_env(uint16_t parent_env, const std::string& parent_path
 }
 
 // ---- conventional memory ---------------------------------------------------------
-// A list of blocks in address order covering 0x0100..heap_end_, every one either owned
-// by somebody or free. See the note on blocks_ for why the bump pointer had to go.
+// Blocks in address order covering the whole arena, every one either owned by somebody
+// or free, each with its MCB in the paragraph below the segment the guest is given. See
+// the note on blocks_ for why the bump pointer had to go, and why the chain is real.
 
-void Dos::mem_split(uint16_t seg) {
+size_t Dos::mem_find(uint16_t seg) const {
+    for (size_t i = 0; i < blocks_.size(); ++i) if (blocks_[i].seg + 1 == seg) return i;
+    return blocks_.size();
+}
+
+// Carve `paras` off the front of block `mcb`, leaving the remainder as a free block with
+// an MCB of its own. The paragraph that MCB occupies comes out of the remainder, so a
+// split of an N-paragraph block into P and R has P + R = N - 1: memory spent on
+// bookkeeping, exactly as DOS spends it.
+void Dos::mem_split(uint16_t mcb, uint16_t paras) {
     for (size_t i = 0; i < blocks_.size(); ++i) {
-        if (blocks_[i].seg == seg) return;                       // already a boundary
-        if (seg > blocks_[i].seg && seg < blocks_[i].seg + blocks_[i].paras) {
-            const Block tail{seg, static_cast<uint16_t>(blocks_[i].seg + blocks_[i].paras - seg),
-                             blocks_[i].used};
-            blocks_[i].paras = static_cast<uint16_t>(seg - blocks_[i].seg);
-            blocks_.insert(blocks_.begin() + i + 1, tail);
-            return;
-        }
+        if (blocks_[i].seg != mcb) continue;
+        if (blocks_[i].paras < paras + 1) return;          // no room for a second MCB
+        const Block tail{static_cast<uint16_t>(mcb + 1 + paras),
+                         static_cast<uint16_t>(blocks_[i].paras - paras - 1), 0, false};
+        blocks_[i].paras = paras;
+        blocks_.insert(blocks_.begin() + i + 1, tail);
+        return;
     }
 }
 
+// Claim [seg, seg+paras) for whoever is asking, splitting whatever free block contains
+// it. Used for a program's own block at load and for where an overlay lands.
 void Dos::mem_own(uint16_t seg, uint16_t paras) {
-    if (seg < kArenaLo || paras == 0) return;
-    const uint32_t top = std::min<uint32_t>(static_cast<uint32_t>(seg) + paras, heap_end_);
-    mem_split(seg);
-    mem_split(static_cast<uint16_t>(top));
-    for (Block& b : blocks_)
-        if (b.seg >= seg && b.seg < top) b.used = true;
-    mem_coalesce();
+    if (!paras) return;
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        const uint32_t lo = blocks_[i].seg + 1, hi = lo + blocks_[i].paras;
+        if (seg < lo || seg >= hi) continue;
+        if (blocks_[i].used) return;                        // already owned; leave it alone
+        if (seg > lo) {                                     // keep the gap below as free
+            mem_split(blocks_[i].seg, static_cast<uint16_t>(seg - 1 - blocks_[i].seg - 1));
+            ++i;
+            if (i >= blocks_.size() || blocks_[i].seg + 1 != seg) return;
+        }
+        if (blocks_[i].paras > paras) mem_split(blocks_[i].seg, paras);
+        blocks_[i].used = true; blocks_[i].owner = psp_seg;
+        mem_coalesce();
+        mem_publish();
+        return;
+    }
 }
 
-// Only free neighbours merge. Two adjacent *used* blocks are two separate allocations
-// and the boundary between them is the whole point: merging them loses the one thing
-// AH=49h and AH=4Ah need, which is where each block begins.
+// Only free neighbours merge, and the merged block absorbs the paragraph the second
+// MCB used to occupy. Two adjacent *used* blocks are two separate allocations and the
+// boundary between them is the whole point: merging them loses the one thing AH=49h and
+// AH=4Ah need, which is where each block begins.
 void Dos::mem_coalesce() {
     for (size_t i = 1; i < blocks_.size();) {
-        if (!blocks_[i].used && !blocks_[i - 1].used &&
-            blocks_[i - 1].seg + blocks_[i - 1].paras == blocks_[i].seg) {
-            blocks_[i - 1].paras = static_cast<uint16_t>(blocks_[i - 1].paras + blocks_[i].paras);
+        const Block& p = blocks_[i - 1];
+        if (!blocks_[i].used && !p.used && p.seg + 1 + p.paras == blocks_[i].seg) {
+            blocks_[i - 1].paras = static_cast<uint16_t>(p.paras + 1 + blocks_[i].paras);
             blocks_.erase(blocks_.begin() + i);
         } else ++i;
     }
@@ -189,66 +225,81 @@ uint16_t Dos::mem_alloc(uint16_t paras) {
     if (!paras) paras = 1;
     for (size_t i = 0; i < blocks_.size(); ++i) {
         if (blocks_[i].used || blocks_[i].paras < paras) continue;
-        const uint16_t seg = blocks_[i].seg;
-        mem_split(static_cast<uint16_t>(seg + paras));
-        for (Block& b : blocks_) if (b.seg == seg) { b.used = true; break; }
-        mem_coalesce();
+        const uint16_t seg = static_cast<uint16_t>(blocks_[i].seg + 1);
+        if (blocks_[i].paras > paras) mem_split(blocks_[i].seg, paras);
+        blocks_[i].used = true; blocks_[i].owner = psp_seg;
+        mem_publish();
         return seg;
     }
     return 0;
 }
 
 bool Dos::mem_free(uint16_t seg) {
-    for (Block& b : blocks_)
-        if (b.seg == seg && b.used) { b.used = false; mem_coalesce(); return true; }
-    return false;
+    const size_t i = mem_find(seg);
+    if (i == blocks_.size() || !blocks_[i].used) return false;
+    blocks_[i].used = false;
+    mem_coalesce();
+    mem_publish();
+    return true;
 }
 
 bool Dos::mem_resize(uint16_t seg, uint16_t paras) {
-    // A block the guest asserts ownership of without having asked us — a stub that
-    // relocated itself inside its own block, most often. Taking the assertion at face
-    // value is closer to DOS than refusing it: split a boundary out at that segment and
-    // let it own from there.
-    mem_split(seg);
-
-    size_t i = 0;
-    for (; i < blocks_.size(); ++i) if (blocks_[i].seg == seg) break;
-    if (i == blocks_.size()) return false;
-
+    size_t i = mem_find(seg);
+    if (i == blocks_.size()) {
+        // A block the guest asserts ownership of without having asked us — a stub that
+        // relocated itself inside its own block, most often. Taking the assertion at
+        // face value is closer to DOS than refusing it.
+        mem_own(seg, 1);
+        i = mem_find(seg);
+        if (i == blocks_.size()) return false;
+    }
     const uint16_t have = blocks_[i].paras;
-    if (paras <= have) {                                  // shrink: the tail comes back
-        if (paras < have) {
-            mem_split(static_cast<uint16_t>(seg + paras));
-            for (Block& b : blocks_) if (b.seg == seg + paras) { b.used = false; break; }
-            mem_coalesce();
-        }
+    if (paras <= have) {                                    // shrink: the tail comes back
+        if (paras < have) { mem_split(blocks_[i].seg, paras); mem_coalesce(); mem_publish(); }
         return true;
     }
-    // Grow, only into free space immediately above — and by *extending this block*, not
-    // by marking the range used. Marking left the new paragraphs as a second used block
-    // butted against the first, so the next grow found its own tail in the way: LSI C's
-    // driver, which creeps its block up one paragraph at a time, got "out of memory"
-    // after exactly two.
+    // Grow, only into free space immediately above, and by *extending this block* rather
+    // than marking the range used. Marking left the new paragraphs as a second used
+    // block butted against the first, so the next grow found its own tail in the way:
+    // LSI C's driver creeps its block up one paragraph at a time and got "out of memory"
+    // after exactly two. Each absorbed neighbour also gives back its MCB paragraph.
     uint32_t avail = have;
-    for (size_t j = i + 1; j < blocks_.size() && !blocks_[j].used; ++j) avail += blocks_[j].paras;
-    if (avail < paras) return false;
-    mem_split(static_cast<uint16_t>(seg + paras));
-    for (i = 0; i < blocks_.size(); ++i) if (blocks_[i].seg == seg) break;
     size_t k = i + 1;
-    while (k < blocks_.size() && blocks_[k].seg < seg + paras) ++k;
+    for (; k < blocks_.size() && !blocks_[k].used; ++k) avail += 1u + blocks_[k].paras;
+    if (avail < paras) return false;
+    blocks_[i].paras = static_cast<uint16_t>(avail);
     blocks_.erase(blocks_.begin() + i + 1, blocks_.begin() + k);
-    blocks_[i].paras = paras;
+    if (blocks_[i].paras > paras) mem_split(blocks_[i].seg, paras);
     mem_coalesce();
+    mem_publish();
     return true;
+}
+
+// The chain DOS/4GW walks: 16 bytes per block at the paragraph below it — 'M' for a link
+// and 'Z' for the last, the owning PSP (0 when free), the size in paragraphs, and the
+// program name DOS 4 added. The first MCB's segment is published at LoL-2 by AH=52h.
+//
+// A *partial* chain is worse than none: one fake MCB for the environment block alone was
+// tried early on and left FreeCOM answering "Bad command or filename" to everything,
+// because a walker that finds a signature follows it to the end. Every block gets one or
+// no block does.
+void Dos::mem_publish() {
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        const Block& b = blocks_[i];
+        mem_.wb(b.seg, 0, i + 1 == blocks_.size() ? 'Z' : 'M');
+        mem_.ww(b.seg, 1, b.used ? b.owner : 0);
+        mem_.ww(b.seg, 3, b.paras);
+        for (int j = 5; j < 8; ++j) mem_.wb(b.seg, j, 0);
+        for (int j = 0; j < 8; ++j) mem_.wb(b.seg, 8 + j, 0);
+    }
 }
 
 void Dos::mem_dump(const char* why) const {
     std::fprintf(stderr, "[mem] %s:", why);
     for (const Block& b : blocks_)
-        std::fprintf(stderr, " %04X+%04X%s", b.seg, b.paras, b.used ? "*" : "");
+        std::fprintf(stderr, " %04X+%04X%s", b.seg + 1, b.paras, b.used ? "*" : "");
     std::fputc('\n', stderr);
 }
-
 void Dos::terminate(int code) {
     if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
     cpu_.exit_code = code;
@@ -674,9 +725,13 @@ bool Dos::int21() {
         // fstat reads as "SFT unavailable" and falls back to ordinary DOS calls. That
         // is an answer we can give truthfully; inventing SFT contents would be the
         // same "success but blank" mistake as the FreeCOM NLS lesson below.
+        //
+        // LoL-2 is the other half of that: the first MCB's segment, which is how a
+        // program walks the memory arena. It used to say 0xFFFF ("none") because there
+        // was no arena to walk; now there is one, and DOS/4GW plans its layout from it.
         case 0x52:
             for (int i = 0; i < 32; ++i) mem_.wb(kLolSeg, i, 0);
-            mem_.ww(kLolSeg, 0x0E, 0xFFFF);          // LoL-2: first MCB segment: none
+            mem_.ww(kLolSeg, 0x0E, blocks_.empty() ? 0xFFFF : blocks_.front().seg);
             mem_.wd(kLolSeg, 0x14, 0xFFFFFFFF);      // LoL+4: SFT chain: empty
             cpu_.set_seg(ES, kLolSeg); cpu_.r[BX] = 0x0010;
             return true;
@@ -886,13 +941,12 @@ bool Dos::int21() {
             const uint16_t blk = cpu_.sreg[ES];
             if (!mem_resize(blk, cpu_.r[BX])) {
                 uint16_t got = 0;                                   // what it could have had
-                for (size_t i = 0; i < blocks_.size(); ++i)
-                    if (blocks_[i].seg == blk) {
-                        got = blocks_[i].paras;
-                        for (size_t j = i + 1; j < blocks_.size() && !blocks_[j].used; ++j)
-                            got = static_cast<uint16_t>(got + blocks_[j].paras);
-                        break;
-                    }
+                const size_t i = mem_find(blk);
+                if (i != blocks_.size()) {
+                    got = blocks_[i].paras;
+                    for (size_t j = i + 1; j < blocks_.size() && !blocks_[j].used; ++j)
+                        got = static_cast<uint16_t>(got + 1 + blocks_[j].paras);
+                }
                 if (trace) { std::fprintf(stderr, "[mem] AH=4Ah %04X wants %04X paras, can have %04X\n",
                                           blk, cpu_.r[BX], got); mem_dump("arena"); }
                 cpu_.flags |= CF; cpu_.r[AX] = 8;                   // INSUFFICIENT MEMORY

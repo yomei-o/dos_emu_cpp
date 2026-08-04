@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     }
 
     std::string err;
-    if (!load_program(file, cpu, 0x0100, cmdline, err, dos_name, 0)) {
+    if (!load_program(file, cpu, 0x0100, cmdline, err, dos_name, dos.alloc_env(dos_name))) {
         std::fprintf(stderr, "dosemu: %s\n", err.c_str());
         return 1;
     }
