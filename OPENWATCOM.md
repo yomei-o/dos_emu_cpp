@@ -1,8 +1,9 @@
 # OpenWatcom — where it stands
 
 The third toolchain. **The compilers work**: `wcc386` (32-bit C), `wcc` (16-bit C) and
-`wpp386` (C++) all run inside the emulator and write a `.obj`. Linking does not, and the
-one thing missing is named precisely at the bottom.
+`wpp386` (C++) all run inside the emulator and write a `.obj`. Linking does not; the
+linker section below says how far DOS/4GW gets and why the last step is a bigger piece of
+work than everything before it.
 
     sh get_fixtures.sh ow
     ./dosemu --root ow ow/binw/wcc386.exe hello.c     # -> hello.obj, "Code size: 44"
@@ -173,10 +174,10 @@ own tail in the way. LSI C's driver creeps its block up one paragraph at a time 
   out of bounds. A segfault waiting for the first guest to use the register form, which
   DOS/4GW is.
 
-## The linker: exactly one thing missing
+## The linker
 
 `wlink.exe` is stubbed for DOS/4GW, so `dos4gw.exe` has to be on `PATH`
-(`get_fixtures.sh ow` puts it there). With it present the stub now gets a long way:
+(`get_fixtures.sh ow` puts it there). With it present the stub gets a long way:
 
 1. it finds `dos4gw.exe` and loads it with **`AH=4Bh AL=03`, load overlay** — the image
    goes where the caller says, relocated by the factor it supplies, with no PSP and no
@@ -187,45 +188,62 @@ own tail in the way. LSI C's driver creeps its block up one paragraph at a time 
 3. it performs the standard memory dance — allocate one paragraph, grow it to 0xFFFF and
    read the real maximum out of BX, shrink back, repeat — which the block allocator now
    answers correctly, step for step
-4. it calls **`AH=52h`** for the DOS list-of-lists
-5. and then asks to grow its own program block past a block it allocated itself, which
-   cannot work with the blocks where we put them, and gives up: `Not enough memory on
-   exec`
+4. it calls **`AH=52h`** for the DOS list-of-lists and walks the MCB chain out of it to
+   plan its layout — which is what the chain below was needed for
 
-**The missing thing is a walkable MCB chain.** Step 4 is the tell: having got the
-list-of-lists, DOS/4GW walks the memory-control-block chain out of it and plans its
-layout from what it sees. Ours has no chain — `AH=52h` returns a well-formed structure
-with an empty SFT list and nothing else — so it plans against a memory map that is not
-the one it will get.
+**That chain is in.** One MCB per block in the paragraph below the segment the guest is
+given (so a block of N paragraphs costs N+1), `'M'`/`'Z'` signature, owner PSP and size,
+republished after every change, with the first MCB's segment at `LoL-2`.
 
-**That chain has been written, on the branch `wip-mcb-chain`, and it moves the wall.**
-One MCB per block in the paragraph below the segment the guest is given (so a block of N
-paragraphs costs N+1), `'M'`/`'Z'` signature, owner PSP and size, republished after every
-change, with the first MCB's segment at `LoL-2`. With it, DOS/4GW stops failing the
-memory dance, calls our DPMI host, switches to 32-bit protected mode, runs two *billion*
-instructions of its own startup, and stops on exactly two functions we do not have:
+It cost one thing on the way: FreeCOM stopped finding its own NLS strings and started
+asking where `COMMAND.COM` was. The environment block was built by the loader at a fixed
+low segment, *outside* the arena, so it had no MCB — and a shell that trusts MCBs
+validates the block it is handed against one. That is the third time FreeCOM has caught a
+half-truth about memory (the first was a lone fake MCB for the environment block alone,
+which left it answering "Bad command or filename" to everything), and the lesson was the
+same each time: a partial chain is worse than none. Fixed at the root — the environment
+is allocated out of the arena like every other block, so `load_program()` no longer
+chooses where it goes.
 
-    int31 AX=0305 -> FAIL 8001    get save-state addresses
-    int31 AX=0306 -> FAIL 8001    get raw CPU mode-switch addresses
+### What the chain unlocked, and where DOS/4GW stands now
 
-(`0A00h`, get vendor API entry, also fails; that one is normal — clients probe it.) So
-the linker's remaining cost is those two DPMI functions, which is a smaller and much
-better-specified job than the chain was.
+With memory described honestly, DOS/4GW stops failing the memory dance and starts
+behaving like the DPMI client it is. Following it from there cost four DPMI functions,
+one 8086 instruction and one internal inconsistency:
 
-It is on a branch and not on `main` because **it costs the shell demo**: FreeCOM stops
-finding its own NLS strings and prompts for the location of `COMMAND.COM`. The cause is
-understood. The top-level environment block is built at a fixed low segment, *outside*
-the arena, so it has no MCB — and once the chain is real, a shell that trusts MCBs
-validates the environment block against one and finds garbage. This is the third time
-FreeCOM has been the thing that notices a half-truth about memory (the first was a lone
-fake MCB for the environment block alone, which left it answering "Bad command or
-filename" to everything), and it is the same lesson each time: a partial chain is worse
-than none.
+- **`0303h`/`0304h`, real-mode callbacks.** A real-mode address that runs a
+  protected-mode procedure of the client's with the real-mode machine state laid out in
+  a structure it nominated. **This was also why every DJGPP program opened with
+  `Coprocessor not present and DPMI setup failed!`** — 0303h is how DJGPP hooks the FPU
+  emulator. That warning is gone, which is the best thing to come out of the exercise.
+- **`0305h`, save-state addresses.** Size zero, meaning "you need not call these", which
+  is true here rather than a shortcut: a mode switch preserves the whole CPU.
+- **`0306h`, raw mode-switch addresses.** Entered by a far JMP with the whole new machine
+  state in registers.
+- **`XLAT`.** An 8086 instruction no guest here had used, and DOS/4GW needs it *before*
+  it can print its own error message — so the first symptom was an unimplemented opcode
+  standing exactly where the explanation should have been.
+- **Descriptor reads and writes disagreed about which table.** `desc_addr()` was LDT-only
+  while `read_desc()` honoured bit 2. DOS/4GW does selector arithmetic on the PSP
+  selector and comes back with `0018` instead of `001C`; with no GDT loaded it then read
+  "descriptors" out of the interrupt vector table and ran with whatever base the vector
+  for INT 6 spelled. With no GDT there is nothing a GDT selector can mean, so it now
+  means what the only table we have says.
 
-The fix is to allocate the top-level environment through `mem_alloc()` like every other
-block, which means `load_program()` stops choosing where it goes and takes it from the
-caller — a small refactor of `loader.cpp` plus `main.cpp` and `web/wasm_api.cpp`. Then
-the branch merges and the question becomes 0305h/0306h.
+DOS/4GW now gets through its selector setup, allocates DOS memory, and reads wlink's own
+32-bit image off disk. **It stops there, and the reason is structural rather than another
+missing function:** it reflects DOS calls by issuing `INT 21h` from protected mode with
+32-bit offsets. Our DOS layer reads its arguments as segment:offset, so the best a host
+can do is alias a selector to the paragraph it covers — which works, and is what a real
+host does, but truncates a 32-bit offset to 16 bits. Serving that properly means real DPMI
+reflection: a transfer buffer in conventional memory, arguments copied in and out per
+function, and the whole DOS layer taught to take a linear address instead of a pair.
+
+That is a bigger piece than everything above put together, and it buys exactly one
+program. The alternative is to stop using `wlink` and write the OMF linker ourselves —
+`src/coff_loader.cpp` is the model for the file parsing, and the `.obj` the compilers
+already produce is the input. More work, but *our* work, with no third-party extender in
+the way and nothing left to reverse-engineer.
 
 The alternative, if the chain turns out to be a bad trade, is to stop using `wlink` and
 write the OMF linker ourselves; `src/coff_loader.cpp` is the model for the file parsing,
@@ -244,6 +262,10 @@ work, with no third-party extender in the way.
 - **`INS`/`OUTS` (`6Ch`-`6Fh`) are still unimplemented.** They only ever turned up while
   a loader was executing data, so they block nothing — but they are real 80186
   instructions and the CPU should have them.
+- **A DPMI client that issues `INT 21h` directly** gets its DS/ES selectors aliased to the
+  paragraph they cover, for the duration of the call, when the base is in conventional
+  memory. That is what a real host does and the only case one can do anything for; it is
+  also where DOS/4GW runs out of road, because it passes 32-bit offsets.
 - The diagnostics that did the work here, in the order they earned their keep:
   `DOSEMU_DOS_TRACE=1` (every INT 21h with its path, command tail and ES),
   `DOSEMU_TRACE=lo-hi` (instruction bytes *and* segment bases — disassembling a file at
