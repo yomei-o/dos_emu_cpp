@@ -67,9 +67,25 @@ public:
     // Linear address for a segment index + offset. Real mode wraps at 1 MiB exactly
     // as the old segment:offset arithmetic did; protected mode uses the descriptor
     // base into the full extended address space.
+    // Always the cached descriptor base — including in real mode, where set_seg keeps
+    // it at selector<<4. That is not pedantry: clearing cr0.PE does NOT reload the
+    // segment registers on a 386, so a descriptor base loaded in protected mode stays
+    // in effect until the next far jump. It is the mechanism behind unreal mode, and
+    // it is exactly what a DOS extender relies on when it switches back to real mode:
+    //
+    //     mov cr0, eax        ; PE off -- but CS still addresses through its cache
+    //     jmp far real_cs:ip  ; only *now* does CS become a paragraph again
+    //
+    // Recomputing selector<<4 the instant PE dropped fetched the next instruction from
+    // the wrong address, and go32 fell into a null selector on its way out.
+    //
+    // The 1 MiB wrap still applies to segments that were loaded as paragraphs, which
+    // is the A20 line: with the gate off, address bit 20 does not exist and FFFF:0010
+    // comes out at 0. A base that came from a descriptor is not a paragraph and is
+    // never wrapped.
     uint32_t lin(int s, uint32_t off) const {
-        const uint32_t a = pe() ? sbase[s] + off
-                                : ((static_cast<uint32_t>(sreg[s]) << 4) + off) & 0xFFFFF;
+        uint32_t a = sbase[s] + off;
+        if (!pe() && sbase[s] == (static_cast<uint32_t>(sreg[s]) << 4)) a &= 0xFFFFF;
         if (watch_hi && s != CS && a >= watch_lo && a <= watch_hi) watch_hit(a, s, off);
         return a;
     }
@@ -81,6 +97,7 @@ public:
     // addresses directly, and a `rep movs` is exactly the thing you end up hunting.
     static uint32_t watch_lo, watch_hi;
     void watch_hit(uint32_t a, int s, uint32_t off) const;
+    void bad_sel(int i, uint16_t sel) const;
     // A decoded GDT/LDT descriptor. `ar` is the access-rights byte (descriptor byte 5)
     // and `hi` the flags nibble (byte 6), which is what LAR reports.
     struct Desc { uint32_t base, limit; uint8_t ar, hi; bool big, present; };
@@ -108,6 +125,13 @@ public:
                      if (i == SS) ss_d = false;
                      return; }
         const Desc d = read_desc(sel);
+        // A real CPU raises #GP here. We have no fault delivery, so the guest would
+        // otherwise carry on with base 0 and execute whatever is at linear 0 — which
+        // looks like a hang in zeroed memory a long way from the instruction at fault.
+        // Only CS and SS: loading a null selector into a data segment register is legal
+        // on a 386 (it faults on use, not on load) and DJGPP's exit path does exactly
+        // that. Warning about those cries wolf on a program that is working fine.
+        if ((i == CS || i == SS) && (sel == 0 || !d.present)) bad_sel(i, sel);
         sbase[i] = d.base; slimit[i] = d.limit;
         if (i == CS) { cs_d = d.big; ip_mask = d.big ? 0xFFFFFFFFu : 0xFFFFu; }
         if (i == SS) ss_d = d.big;

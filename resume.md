@@ -210,13 +210,32 @@ That is a 32-bit protected-mode program, compiled from C by gcc inside the emula
 running under the built-in DPMI host. `-lgcc` is not optional: printf pulls in
 `__udivdi3`/`__umoddi3`.
 
-**⏭ The one gap: the `gcc` driver.** `gcc -O2 hello.c -o hello.exe` creates its
-temporary `.s`, spawns cc1 — and cc1 hangs, producing nothing, though the *same* cc1
-with the *same* arguments works standalone. So it is something about running as an EXEC
-child of a protected-mode parent, not about cc1. `Dos::exec` now saves and restores the
-whole `Cpu::State` rather than just `r[]`/`sreg[]` (it has to: cr0 and the descriptor
-cache decide how those registers are read), which was certainly a bug, but it was not
-this one. Next: sample the child with `DOSEMU_SAMPLE` the way the SFT loop was found.
+**⏭ The one gap: the `gcc` driver, and it is narrowed to one number.** `gcc -O2
+hello.c -o hello.exe` creates its temporary `.s`, spawns cc1 — the nested EXEC out of
+protected mode works — and the child dies. Traced with `DOSEMU_DPMI_TRACE`, the child's
+last moments are:
+
+    int31 0501 BX=0042 CX=0000  -> ok      the stub allocates 0x00420000 for the image
+    int31 0006 BX=0094          -> 0042:0000   crt0 reads that block's base back
+    int31 0501 BX=8084 CX=0000  -> FAIL    crt0 then asks for 0x80840000 -- 2.1 GB
+
+and the stub takes its failure path, frees its selectors and exits. The `[gp] loaded CS
+with the null selector` messages that follow are that teardown, not the cause.
+
+**0x80840000 is `0x00420000 * 2` with bit 31 set.** Standalone, the same cc1 asks for a
+sane growing sequence (0x6C0000, 0x7C0000, 0x7E0000, …) and succeeds. So the arithmetic
+that produces the size is being fed, or computing, something different when cc1 runs as
+a child — and one spurious high bit is the whole difference. Note the child never calls
+0500h (get free memory information), so it is not our answer to that.
+
+Next step: watch the instructions that produce that value. `0006h` returns the base in
+CX:DX, so put `DOSEMU_WATCH` on the child's stub-info block, or single-step from the
+`0006h` return to the `0501h` call — it is a few dozen instructions apart and the
+sampler already gives the exact CS:EIP of both.
+
+Ruled out on the way: `Dos::exec` was saving only `r[]`/`sreg[]` and not the
+protected-mode state — a genuine bug, fixed with `Cpu::save()/restore()`, but not this
+one. So was the descriptor cache surviving a PE->real transition (below).
 
 **Four bugs, all the same shape.** Every one of these let the guest keep running on an
 answer that was well-formed and wrong, so the damage surfaced far away:
@@ -238,6 +257,19 @@ answer that was well-formed and wrong, so the damage surfaced far away:
   agree about a file.
 - **`AH=5Bh` (create new file) was missing** — how a program claims a temporary name
   without a race. Without it the driver stops at `Cannot create temporary file`.
+
+- **The descriptor cache did not survive clearing cr0.PE.** `lin()` recomputed
+  `selector<<4` the instant PE dropped, but a 386 keeps the cached base until the next
+  far jump — which is the whole mechanism behind unreal mode, and exactly what a DOS
+  extender relies on when it switches back:
+
+        mov cr0, eax         ; PE off, but CS still addresses through its cache
+        jmp far real_cs:ip   ; only now does CS become a paragraph again
+
+  `lin()` now always uses `sbase[]`, and applies the 1 MiB wrap only to a segment whose
+  base is still `selector<<4` — that wrap is the A20 line, not segmentation: with the
+  gate off address bit 20 does not exist and FFFF:0010 comes out at 0. A base that came
+  from a descriptor is not a paragraph and must never be wrapped.
 
 **The x87 is implemented** (`src/fpu.cpp`): eight doubles as the register stack, exact
 m32/m64/m80 and integer memory formats, compares through C0/C2/C3, FLDCW/FNSTSW/FNINIT.

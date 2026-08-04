@@ -32,6 +32,14 @@ void Cpu::watch_hit(uint32_t a, int s, uint32_t off) const {
            a, s, sreg[s], sbase[s], off, sreg[CS], ip);
 }
 
+void Cpu::bad_sel(int i, uint16_t sel) const {
+    static int n = 0;
+    if (++n > 8) return;
+    static const char* nm[] = {"ES","CS","SS","DS","FS","GS"};
+    printf("[gp] loaded %s with %s selector %04X at %04X:%08X (a real CPU faults here)\n",
+           nm[i], sel ? "a not-present" : "the null", sel, sreg[CS], ip);
+}
+
 void Cpu::fail(const std::string& msg, uint8_t op) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "%s (opcode 0x%02X) at %04X:%04X", msg.c_str(), op,

@@ -239,7 +239,7 @@ bool Dos::int21() {
         case 0x0E: cpu_.sb(AX, 3); return true;                     // select drive -> report 3 drives
         case 0x19: cpu_.sb(AX, 0); return true;                     // get current drive -> A:
         case 0x1A: dta_seg_ = cpu_.sreg[DS]; dta_off_ = cpu_.r[DX]; return true;   // set DTA
-        case 0x2F: cpu_.sreg[ES] = dta_seg_; cpu_.r[BX] = dta_off_; return true;   // get DTA -> ES:BX
+        case 0x2F: cpu_.set_seg(ES, dta_seg_); cpu_.r[BX] = dta_off_; return true;   // get DTA -> ES:BX
         case 0x4E:                                                  // find first (DS:DX spec, CX attr)
             if (cpu_.r[CX] == 0x08) { cpu_.flags |= CF; cpu_.r[AX] = 18; return true; }  // no volume label
             if (find_first(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]), cpu_.r[CX])) { write_dta_entry(); cpu_.flags &= ~CF; }
@@ -315,7 +315,7 @@ bool Dos::int21() {
         case 0x35: {                                                // get interrupt vector (AL=n) -> ES:BX
             uint8_t v = cpu_.r[AX] & 0xFF;
             cpu_.r[BX] = mem_.r16(v * 4);
-            cpu_.sreg[ES] = mem_.r16(v * 4 + 2);
+            cpu_.set_seg(ES, mem_.r16(v * 4 + 2));
             return true;
         }
         case 0x37:                                                  // get/set switch character
