@@ -42,7 +42,11 @@ Dpmi::Dpmi(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
 
 uint16_t Dpmi::alloc_sel(int count) {
     if (next_sel_ + count > kLdtCount) return 0;
-    uint16_t sel = static_cast<uint16_t>(next_sel_ * 8 + 4);   // bit 2 = LDT, RPL 0
+    // bit 2 = LDT, and RPL 3, because that is what a DPMI client is: a ring-3 program.
+    // The descriptors already say DPL 3; the selectors said RPL 0, and a client can read
+    // its own CPL off CS. DOS/4GW does, and at ring 0 it concludes it owns the machine and
+    // starts reflecting DOS calls by switching modes itself rather than asking the host.
+    uint16_t sel = static_cast<uint16_t>(next_sel_ * 8 + 7);
     next_sel_ += count;
     return sel;
 }
@@ -204,8 +208,9 @@ bool Dpmi::pm_int(uint8_t n) {
     if (wide) { cpu_.push32(cpu_.flags); cpu_.push32(cpu_.sreg[CS]); cpu_.push32(cpu_.ip); }
     else      { cpu_.push16(cpu_.flags); cpu_.push16(cpu_.sreg[CS]);
                 cpu_.push16(static_cast<uint16_t>(cpu_.ip)); }
-    if (trace) printf("[dpmi] pm int %02X -> client %04X:%08X (%s frame)\n",
-                      n, h.sel, h.off, wide ? "32-bit" : "16-bit");
+    if (trace) printf("[dpmi]%llu pm int %02X ax=%04X -> client %04X:%08X (%s frame)\n",
+                      static_cast<unsigned long long>(cpu_.insns), n, cpu_.r[AX],
+                      h.sel, h.off, wide ? "32-bit" : "16-bit");
     cpu_.set_flag(IF, false);
     cpu_.set_seg(CS, h.sel);
     cpu_.jump(h.off);
