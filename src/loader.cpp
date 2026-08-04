@@ -14,7 +14,11 @@ bool is_djgpp_coff(const std::vector<uint8_t>&);
 
 // A shared environment block (PATH so the compiler driver finds its passes, and
 // the program's own full path — which a shell like FreeCOM reads to find itself).
-static constexpr uint16_t kEnvSeg = 0x00F0;
+// Below the DPMI entry (0x00E0) and the list-of-lists (0x00E1), in the gap left by the
+// IVT stubs (which end at 0x008F). It used to sit at 0x00F0, 16 paragraphs under the
+// first PSP — which is exactly where the arena's first MCB has to go now, and an
+// environment longer than 240 bytes would have grown into it. There is 1.2 KiB here.
+static constexpr uint16_t kEnvSeg = 0x0090;
 static void build_env(Memory& mem, const std::string& dos_name) {
     // DJGPP finds everything else from DJGPP.ENV, so that one variable plus its bin
     // directory on PATH is the whole configuration. LSI C's directory stays first;

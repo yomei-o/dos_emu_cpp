@@ -23,7 +23,8 @@ public:
         dpmi_.real_int = [this](uint8_t n) { return handle(n); };
         install_ivt_stubs();
         dpmi_.get_psp = [this] { return psp_seg; };
-        blocks_.push_back({kArenaLo, static_cast<uint16_t>(heap_end_ - kArenaLo), false});
+        blocks_.push_back({kArenaMcb, static_cast<uint16_t>(heap_end_ - kArenaMcb - 1), 0, false});
+        mem_publish();
         dpmi_.alloc_dos = [this](uint16_t paras) { return mem_alloc(paras); };
     }
 
@@ -84,19 +85,26 @@ private:
     // destroyed the whole arena the moment a stub relocated itself high and resized
     // there: wlink's does, and every later allocation failed with "insufficient memory"
     // while 600 KiB sat unused. So: blocks, first fit, and a free that frees.
-    struct Block { uint16_t seg, paras; bool used; };
+    // `seg` is the block's **MCB** paragraph; the guest sees seg+1 and owns `paras`
+    // paragraphs from there, so a block of N costs N+1. That accounting is not
+    // bookkeeping for its own sake: DOS/4GW asks AH=52h for the list-of-lists and then
+    // walks the MCB chain out of it to plan its layout, and a chain has to live
+    // somewhere real. mem_publish() writes it into guest memory after every change.
+    struct Block { uint16_t seg, paras, owner; bool used; };
     std::vector<Block> blocks_;                    // contiguous, ordered, covers the arena
-    static constexpr uint16_t kArenaLo = 0x0100;   // the first program's PSP
+    static constexpr uint16_t kArenaMcb = 0x00FF;  // first MCB; the first PSP is 0x0100
     uint16_t heap_end_ = 0x9F00;                   // just below the video/BIOS area (~640 KiB)
 
-    void     mem_split(uint16_t seg);              // ensure a block boundary at seg
-    void     mem_own(uint16_t seg, uint16_t paras); // mark a range used (a program's block)
-    uint16_t mem_alloc(uint16_t paras);             // 0 if it does not fit
+    void     mem_split(uint16_t mcb, uint16_t paras);  // carve `paras` off the front
+    void     mem_own(uint16_t seg, uint16_t paras);    // claim a range (a program's block)
+    uint16_t mem_alloc(uint16_t paras);                // guest segment, or 0 if it does not fit
     bool     mem_free(uint16_t seg);
     bool     mem_resize(uint16_t seg, uint16_t paras);
     uint16_t mem_largest() const;
     void     mem_coalesce();
+    void     mem_publish();                            // write the MCB chain into memory
     void     mem_dump(const char* why) const;
+    size_t   mem_find(uint16_t seg) const;             // index of the block the guest calls `seg`
 
     // EXEC (AH=4Bh): a child runs on the same CPU via a nested loop. terminate()
     // ends the whole process at depth 0 but only the child at depth > 0.
