@@ -23,10 +23,8 @@ public:
         dpmi_.real_int = [this](uint8_t n) { return handle(n); };
         install_ivt_stubs();
         dpmi_.get_psp = [this] { return psp_seg; };
-        dpmi_.alloc_dos = [this](uint16_t paras) -> uint16_t {
-            if (heap_next_ + paras > heap_end_) return 0;
-            uint16_t seg = heap_next_; heap_next_ += paras; return seg;
-        };
+        blocks_.push_back({kArenaLo, static_cast<uint16_t>(heap_end_ - kArenaLo), false});
+        dpmi_.alloc_dos = [this](uint16_t paras) { return mem_alloc(paras); };
     }
 
     // Guest output (fd 1/2) goes here; defaults to stdout/stderr.
@@ -53,6 +51,7 @@ public:
 
 private:
     uint16_t make_child_env(uint16_t parent_env, const std::string& child_name);
+    bool load_overlay(const std::string& name, uint16_t pb_seg, uint16_t pb_off);
 public:
     DosFiles& files() { return files_; }
 
@@ -75,10 +74,29 @@ private:
         return s;
     }
 
-    // A bump allocator over conventional memory (paragraphs). Real DOS keeps an MCB
-    // chain; a growing pointer is enough to satisfy a program's startup and malloc.
-    uint16_t heap_next_ = 0x3000;   // ~192 KiB, above where programs load
-    uint16_t heap_end_  = 0x9F00;   // just below the video/BIOS area (~640 KiB)
+    // Conventional memory, as a list of blocks in address order.
+    //
+    // This was a bump pointer, which is enough for a program that starts, mallocs and
+    // exits. It is not enough for a DOS extender, because the way one sizes itself is to
+    // ask for *everything* and then release what it does not need — and a bump pointer
+    // cannot express releasing. Worse, the rule that kept it from handing out memory a
+    // program already owned ("if the block is above the mark, move the mark past it")
+    // destroyed the whole arena the moment a stub relocated itself high and resized
+    // there: wlink's does, and every later allocation failed with "insufficient memory"
+    // while 600 KiB sat unused. So: blocks, first fit, and a free that frees.
+    struct Block { uint16_t seg, paras; bool used; };
+    std::vector<Block> blocks_;                    // contiguous, ordered, covers the arena
+    static constexpr uint16_t kArenaLo = 0x0100;   // the first program's PSP
+    uint16_t heap_end_ = 0x9F00;                   // just below the video/BIOS area (~640 KiB)
+
+    void     mem_split(uint16_t seg);              // ensure a block boundary at seg
+    void     mem_own(uint16_t seg, uint16_t paras); // mark a range used (a program's block)
+    uint16_t mem_alloc(uint16_t paras);             // 0 if it does not fit
+    bool     mem_free(uint16_t seg);
+    bool     mem_resize(uint16_t seg, uint16_t paras);
+    uint16_t mem_largest() const;
+    void     mem_coalesce();
+    void     mem_dump(const char* why) const;
 
     // EXEC (AH=4Bh): a child runs on the same CPU via a nested loop. terminate()
     // ends the whole process at depth 0 but only the child at depth > 0.

@@ -109,7 +109,7 @@ namespace {
 struct Modrm {
     uint8_t mod, reg, rm;
     bool is_reg;
-    int seg_idx;         // segment register index (ES..GS) for memory operands
+    int seg_idx = DS;    // segment register index (ES..GS); only meaningful for memory
     uint32_t off;        // effective offset (16- or 32-bit)
 };
 }
@@ -388,7 +388,11 @@ void Cpu::step() {
                     default: break;                  // VERR/VERW: no-op
                 } break; }
             case 0x01: { Modrm m; decode_modrm(m);   // group 7: SGDT/SIDT/LGDT/LIDT/SMSW/LMSW
-                uint32_t a = pa(m);
+                // Only the four table instructions take memory; SMSW/LMSW take a
+                // register, and for a register operand decode_modrm leaves seg_idx
+                // unset — computing an address anyway indexed sbase[] out of bounds and
+                // crashed. DOS/4GW is the first guest here to use the register form.
+                const uint32_t a = m.is_reg ? 0 : pa(m);
                 switch (m.reg) {
                     case 0: mem_.w16(a, gdt_limit); mem_.w32(a + 2, gdt_base); break;   // SGDT
                     case 1: mem_.w16(a, idt_limit); mem_.w32(a + 2, idt_base); break;   // SIDT

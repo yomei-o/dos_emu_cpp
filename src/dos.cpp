@@ -30,8 +30,15 @@ bool Dos::trace = getenv("DOSEMU_DOS_TRACE") != nullptr;
 // environment all live at 0x0E00 and above.
 static constexpr uint16_t kIvtStubSeg = 0x0050;
 
+// ...but only for the vectors a PC actually has. Above 0x7F the table is where drivers
+// and extenders put *themselves*, and they find room by scanning for entries that are
+// not in use. DOS/4GW walks 0x2C8-0x2FA (vectors 0xB2-0xBE) looking for a repeated
+// value; with all 256 stubbed, every entry there was distinct and it scanned for ever.
+// Zero is what DOS leaves in that range and it is the honest answer to "is anything
+// hooked here?" — a program that installs one writes the vector first anyway.
 void Dos::install_ivt_stubs() {
-    for (int n = 0; n < 256; ++n) {
+    for (int n = 0x80; n < 256; ++n) mem_.w32(n * 4, 0);
+    for (int n = 0; n < 0x80; ++n) {
         const uint16_t off = static_cast<uint16_t>(n * 4);
         mem_.wb(kIvtStubSeg, off + 0, 0xCD);                 // INT n
         mem_.wb(kIvtStubSeg, off + 1, static_cast<uint8_t>(n));
@@ -61,7 +68,17 @@ bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string
 void Dos::init_psp(uint16_t psp, uint16_t parent, const std::string& path) {
     prog_path = path;
     env_seg = mem_.rw(psp, 0x2C);   // still a segment now; the DPMI switch may rewrite it
-    mem_.ww(psp, 0x02, heap_end_);
+    // A program DOS loads owns all of memory from its PSP up, and shrinks its block to
+    // what it needs. A child's block was already carved out by exec(), so this only
+    // claims it for the top-level program — but that claim is what makes the first
+    // AH=4Ah a *shrink* rather than an allocation out of thin air.
+    uint16_t top = heap_end_;
+    bool owned = false;
+    for (const Block& b : blocks_) if (b.seg == psp && b.used) {
+        owned = true; top = static_cast<uint16_t>(b.seg + b.paras); break;
+    }
+    if (!owned) mem_own(psp, static_cast<uint16_t>(heap_end_ - psp));
+    mem_.ww(psp, 0x02, top);
     mem_.ww(psp, 0x16, parent);
     mem_.wb(psp, 0x50, 0xCD); mem_.wb(psp, 0x51, 0x21); mem_.wb(psp, 0x52, 0xCB);
 }
@@ -116,17 +133,178 @@ uint16_t Dos::make_child_env(uint16_t parent_env, const std::string& parent_path
         std::fputc('\n', stderr);
     }
     const uint16_t paras = static_cast<uint16_t>((b.size() + 15) / 16);
-    if (heap_next_ + paras > heap_end_) return parent_env;   // no room: share, as before
-    const uint16_t seg = heap_next_;
-    heap_next_ += paras;
+    const uint16_t seg = mem_alloc(paras);
+    if (!seg) return parent_env;                            // no room: share, as before
     for (size_t i = 0; i < b.size(); ++i) mem_.wb(seg, static_cast<uint16_t>(i), b[i]);
     return seg;
+}
+
+// ---- conventional memory ---------------------------------------------------------
+// A list of blocks in address order covering 0x0100..heap_end_, every one either owned
+// by somebody or free. See the note on blocks_ for why the bump pointer had to go.
+
+void Dos::mem_split(uint16_t seg) {
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        if (blocks_[i].seg == seg) return;                       // already a boundary
+        if (seg > blocks_[i].seg && seg < blocks_[i].seg + blocks_[i].paras) {
+            const Block tail{seg, static_cast<uint16_t>(blocks_[i].seg + blocks_[i].paras - seg),
+                             blocks_[i].used};
+            blocks_[i].paras = static_cast<uint16_t>(seg - blocks_[i].seg);
+            blocks_.insert(blocks_.begin() + i + 1, tail);
+            return;
+        }
+    }
+}
+
+void Dos::mem_own(uint16_t seg, uint16_t paras) {
+    if (seg < kArenaLo || paras == 0) return;
+    const uint32_t top = std::min<uint32_t>(static_cast<uint32_t>(seg) + paras, heap_end_);
+    mem_split(seg);
+    mem_split(static_cast<uint16_t>(top));
+    for (Block& b : blocks_)
+        if (b.seg >= seg && b.seg < top) b.used = true;
+    mem_coalesce();
+}
+
+// Only free neighbours merge. Two adjacent *used* blocks are two separate allocations
+// and the boundary between them is the whole point: merging them loses the one thing
+// AH=49h and AH=4Ah need, which is where each block begins.
+void Dos::mem_coalesce() {
+    for (size_t i = 1; i < blocks_.size();) {
+        if (!blocks_[i].used && !blocks_[i - 1].used &&
+            blocks_[i - 1].seg + blocks_[i - 1].paras == blocks_[i].seg) {
+            blocks_[i - 1].paras = static_cast<uint16_t>(blocks_[i - 1].paras + blocks_[i].paras);
+            blocks_.erase(blocks_.begin() + i);
+        } else ++i;
+    }
+}
+
+uint16_t Dos::mem_largest() const {
+    uint16_t best = 0;
+    for (const Block& b : blocks_) if (!b.used && b.paras > best) best = b.paras;
+    return best;
+}
+
+uint16_t Dos::mem_alloc(uint16_t paras) {
+    if (!paras) paras = 1;
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        if (blocks_[i].used || blocks_[i].paras < paras) continue;
+        const uint16_t seg = blocks_[i].seg;
+        mem_split(static_cast<uint16_t>(seg + paras));
+        for (Block& b : blocks_) if (b.seg == seg) { b.used = true; break; }
+        mem_coalesce();
+        return seg;
+    }
+    return 0;
+}
+
+bool Dos::mem_free(uint16_t seg) {
+    for (Block& b : blocks_)
+        if (b.seg == seg && b.used) { b.used = false; mem_coalesce(); return true; }
+    return false;
+}
+
+bool Dos::mem_resize(uint16_t seg, uint16_t paras) {
+    // A block the guest asserts ownership of without having asked us — a stub that
+    // relocated itself inside its own block, most often. Taking the assertion at face
+    // value is closer to DOS than refusing it: split a boundary out at that segment and
+    // let it own from there.
+    mem_split(seg);
+
+    size_t i = 0;
+    for (; i < blocks_.size(); ++i) if (blocks_[i].seg == seg) break;
+    if (i == blocks_.size()) return false;
+
+    const uint16_t have = blocks_[i].paras;
+    if (paras <= have) {                                  // shrink: the tail comes back
+        if (paras < have) {
+            mem_split(static_cast<uint16_t>(seg + paras));
+            for (Block& b : blocks_) if (b.seg == seg + paras) { b.used = false; break; }
+            mem_coalesce();
+        }
+        return true;
+    }
+    // Grow, only into free space immediately above — and by *extending this block*, not
+    // by marking the range used. Marking left the new paragraphs as a second used block
+    // butted against the first, so the next grow found its own tail in the way: LSI C's
+    // driver, which creeps its block up one paragraph at a time, got "out of memory"
+    // after exactly two.
+    uint32_t avail = have;
+    for (size_t j = i + 1; j < blocks_.size() && !blocks_[j].used; ++j) avail += blocks_[j].paras;
+    if (avail < paras) return false;
+    mem_split(static_cast<uint16_t>(seg + paras));
+    for (i = 0; i < blocks_.size(); ++i) if (blocks_[i].seg == seg) break;
+    size_t k = i + 1;
+    while (k < blocks_.size() && blocks_[k].seg < seg + paras) ++k;
+    blocks_.erase(blocks_.begin() + i + 1, blocks_.begin() + k);
+    blocks_[i].paras = paras;
+    mem_coalesce();
+    return true;
+}
+
+void Dos::mem_dump(const char* why) const {
+    std::fprintf(stderr, "[mem] %s:", why);
+    for (const Block& b : blocks_)
+        std::fprintf(stderr, " %04X+%04X%s", b.seg, b.paras, b.used ? "*" : "");
+    std::fputc('\n', stderr);
 }
 
 void Dos::terminate(int code) {
     if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
     cpu_.exit_code = code;
     cpu_.halted = true;
+}
+
+// AH=4Bh AL=03 — load an overlay. The image goes where the caller says, relocated by the
+// factor it supplies, with no PSP and no transfer of control: the caller has already
+// sized its own memory block and will far-call in itself. This is how a DOS extender's
+// stub brings in the extender. Watcom's `wlink` is stubbed for DOS/4GW and loads
+// `dos4gw.exe` exactly this way, so without it the linker cannot start at all — and
+// "load and execute" is not a substitute, because a second PSP is the one thing the
+// stub does not want.
+bool Dos::load_overlay(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
+    std::string host = files_.host_path(name);
+    std::FILE* fp = std::fopen(host.c_str(), "rb");
+    if (!fp) { cpu_.flags |= CF; cpu_.r[AX] = 2; return true; }
+    std::fseek(fp, 0, SEEK_END); long n = std::ftell(fp); std::fseek(fp, 0, SEEK_SET);
+    std::vector<uint8_t> f(n > 0 ? n : 0);
+    if (n > 0 && std::fread(f.data(), 1, n, fp) != static_cast<size_t>(n)) f.clear();
+    std::fclose(fp);
+    if (f.empty()) { cpu_.flags |= CF; cpu_.r[AX] = 2; return true; }
+
+    const uint16_t load_seg = mem_.rw(pb_seg, pb_off);          // where it goes
+    const uint16_t factor   = mem_.rw(pb_seg, pb_off + 2);      // what to add to each fixup
+    auto rd16 = [&](size_t o) {
+        return static_cast<uint16_t>(o + 1 < f.size() ? (f[o] | (f[o + 1] << 8)) : 0);
+    };
+
+    uint32_t loaded = 0;
+    if (f.size() >= 2 && f[0] == 'M' && f[1] == 'Z') {
+        const uint16_t bytes_last = rd16(2), pages = rd16(4), nreloc = rd16(6);
+        const uint16_t hdr_paras = rd16(8), reloc_off = rd16(24);
+        const uint32_t hdr_bytes = static_cast<uint32_t>(hdr_paras) * 16;
+        uint32_t image_bytes = static_cast<uint32_t>(pages) * 512;
+        if (bytes_last) image_bytes = image_bytes - 512 + bytes_last;
+        if (image_bytes > f.size()) image_bytes = static_cast<uint32_t>(f.size());
+        if (hdr_bytes > image_bytes) { cpu_.flags |= CF; cpu_.r[AX] = 11; return true; }
+        loaded = image_bytes - hdr_bytes;
+        mem_.write(Memory::phys(load_seg, 0), f.data() + hdr_bytes, loaded);
+        for (uint16_t i = 0; i < nreloc; ++i) {
+            const uint16_t ro = rd16(reloc_off + i * 4);
+            const uint16_t rs = rd16(reloc_off + i * 4 + 2);
+            mem_.ww(load_seg + rs, ro, static_cast<uint16_t>(mem_.rw(load_seg + rs, ro) + factor));
+        }
+    } else {
+        loaded = static_cast<uint32_t>(f.size());
+        mem_.write(Memory::phys(load_seg, 0), f.data(), loaded);
+    }
+    // Where an overlay lands is memory the caller owns; record that, so a later AH=48h
+    // does not hand out the middle of the extender we just put there.
+    mem_own(load_seg, static_cast<uint16_t>((loaded + 15) / 16));
+    if (trace) std::fprintf(stderr, "[overlay] %s -> %04X:0000, %u bytes, factor %04X\n",
+                            name.c_str(), load_seg, loaded, factor);
+    cpu_.flags &= ~CF;
+    return true;
 }
 
 // INT 21h AH=4Bh AL=0: load and run a child program to completion, then return to
@@ -155,7 +333,8 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     // read. A child that switches to protected mode and exits would otherwise leave
     // the parent running with the child's addressing.
     const Cpu::State parent = cpu_.save();
-    uint16_t spsp = psp_seg, sheap = heap_next_, senv = env_seg;
+    uint16_t spsp = psp_seg, senv = env_seg;
+    const std::vector<Block> sblocks = blocks_;   // the child's allocations unwind with it
     const std::string sname = prog_path;
 
     // The parameter block's environment word: a segment to use as is, or 0 meaning
@@ -172,12 +351,16 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     uint16_t child_env = mem_.rw(pb_seg, pb_off);
     if (!child_env) child_env = make_child_env(senv, name);
 
-    uint16_t child_psp = heap_next_;
-    heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
+    // The child gets everything that is free, which is what DOS does: it hands the
+    // program the largest block and lets it shrink to what it needs. A fixed 96 KiB was
+    // enough for LSI C's passes and nothing else.
+    const uint16_t child_paras = mem_largest();
+    const uint16_t child_psp = mem_alloc(child_paras);
+    if (!child_psp) { cpu_.flags |= CF; cpu_.r[AX] = 8; return true; }
 
     std::string err;
     if (!load_program(file, cpu_, child_psp, tail, err, name, child_env)) {
-        cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap; env_seg = senv; prog_path = sname;
+        cpu_.restore(parent); psp_seg = spsp; blocks_ = sblocks; env_seg = senv; prog_path = sname;
         cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
     }
     init_psp(child_psp, spsp, name);  // the child's parent is us
@@ -192,7 +375,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     child_exited_ = saved_exited;
 
     // Restore the parent and hand it the child's exit code (via AH=4Dh).
-    cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap; env_seg = senv; prog_path = sname;
+    cpu_.restore(parent); psp_seg = spsp; blocks_ = sblocks; env_seg = senv; prog_path = sname;
     last_child_code_ = code;
     cpu_.flags &= ~CF; cpu_.r[AX] = 0;
     return true;
@@ -283,6 +466,7 @@ bool Dos::handle(uint8_t n) {
         case 0x21: {
             if (!trace) return int21();
             const uint16_t ax = cpu_.r[AX], bx = cpu_.r[BX], cx = cpu_.r[CX], dx = cpu_.r[DX];
+            const uint16_t es = cpu_.sreg[ES];   // AH=48/49/4Ah and EXEC all carry a segment here
             // The calls that carry a string say far more than their registers do.
             const uint8_t ah_ = ax >> 8;
             if (ah_ == 0x3D || ah_ == 0x3C || ah_ == 0x41 || ah_ == 0x43 || ah_ == 0x4E ||
@@ -301,9 +485,9 @@ bool Dos::handle(uint8_t n) {
             }
             const bool r = int21();
             std::fprintf(stderr,
-                "[int21]%llu ah=%02X al=%02X bx=%04X cx=%04X ds:dx=%04X:%04X -> %s ax=%04X bx=%04X"
+                "[int21]%llu ah=%02X al=%02X bx=%04X cx=%04X ds:dx=%04X:%04X es=%04X -> %s ax=%04X bx=%04X"
                 "  at %04X:%08X\n",
-                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, cpu_.sreg[DS], dx,
+                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, cpu_.sreg[DS], dx, es,
                 (cpu_.flags & CF) ? "CF" : "ok", cpu_.r[AX], cpu_.r[BX],
                 cpu_.sreg[CS], cpu_.ip);
             return r;
@@ -388,6 +572,10 @@ bool Dos::int21() {
         }
         case 0x0B: cpu_.sb(AX, 0xFF); return true;                  // check input status: char available
         case 0x0C: return true;                                     // flush + input — ignore
+        // Reset drive: flush DOS's write buffers. We write through, so there is nothing
+        // to flush and "done" is the truthful answer — but it has to be an *answer*.
+        // DOS/4GW issues it before loading and treats a refusal as a failure.
+        case 0x0D: cpu_.flags &= ~CF; return true;
         case 0x0E: cpu_.sb(AX, 3); return true;                     // select drive -> report 3 drives
         case 0x19: cpu_.sb(AX, 0); return true;                     // get current drive -> A:
         case 0x1A: dta_seg_ = cpu_.sreg[DS]; dta_off_ = cpu_.r[DX]; return true;   // set DTA
@@ -622,16 +810,20 @@ bool Dos::int21() {
             }
             cpu_.flags &= ~CF; cpu_.r[DX] = 0; return true;
         case 0x48: {                                                // allocate memory (BX paragraphs)
-            uint16_t paras = cpu_.r[BX];
-            if (heap_next_ + paras > heap_end_) {                   // not enough: report largest free
+            const uint16_t seg = mem_alloc(cpu_.r[BX]);
+            if (!seg) {                                             // not enough: report largest free
+                if (trace) { std::fprintf(stderr, "[mem] AH=48h wants %04X paras, largest free %04X\n",
+                                          cpu_.r[BX], mem_largest()); mem_dump("arena"); }
                 cpu_.flags |= CF; cpu_.r[AX] = 8;                   // INSUFFICIENT MEMORY
-                cpu_.r[BX] = heap_end_ - heap_next_;
+                cpu_.r[BX] = mem_largest();
                 return true;
             }
-            cpu_.r[AX] = heap_next_; heap_next_ += paras;
+            cpu_.r[AX] = seg;
             cpu_.flags &= ~CF; return true;
         }
-        case 0x49: cpu_.flags &= ~CF; return true;                  // free memory: accept (bump never frees)
+        case 0x49:                                                  // free memory (ES = block)
+            if (!mem_free(cpu_.sreg[ES])) { cpu_.flags |= CF; cpu_.r[AX] = 9; return true; }
+            cpu_.flags &= ~CF; return true;
         // Get/set the current PSP. Nothing 16-bit here ever asked, because a .COM or
         // .EXE is handed DS=ES=PSP at entry and just keeps it. A DOS extender cannot:
         // it reloads the segment registers to switch modes, so it asks — and until
@@ -692,22 +884,30 @@ bool Dos::int21() {
             // it owned memory that was not there, and it gave up with
             // `Fatal error allocating DOS memory`. Report the truth instead.
             const uint16_t blk = cpu_.sreg[ES];
-            const uint16_t maxpara = blk < heap_end_ ? heap_end_ - blk : 0;
-            if (cpu_.r[BX] > maxpara) {
+            if (!mem_resize(blk, cpu_.r[BX])) {
+                uint16_t got = 0;                                   // what it could have had
+                for (size_t i = 0; i < blocks_.size(); ++i)
+                    if (blocks_[i].seg == blk) {
+                        got = blocks_[i].paras;
+                        for (size_t j = i + 1; j < blocks_.size() && !blocks_[j].used; ++j)
+                            got = static_cast<uint16_t>(got + blocks_[j].paras);
+                        break;
+                    }
+                if (trace) { std::fprintf(stderr, "[mem] AH=4Ah %04X wants %04X paras, can have %04X\n",
+                                          blk, cpu_.r[BX], got); mem_dump("arena"); }
                 cpu_.flags |= CF; cpu_.r[AX] = 8;                   // INSUFFICIENT MEMORY
-                cpu_.r[BX] = maxpara;                               // ...but this much is free
+                cpu_.r[BX] = got;                                   // ...but this much is free
                 return true;
             }
-            // A shrink hands the tail back, which is what a program does at startup to
-            // make room for its children. Only meaningful for the block the bump
-            // allocator would hand out next.
-            if (blk + cpu_.r[BX] > heap_next_ || blk >= heap_next_) heap_next_ = blk + cpu_.r[BX];
             cpu_.flags &= ~CF; return true;
         }
-        case 0x4B:                                                  // load & execute (AL=0) / load overlay
-            if ((cpu_.r[AX] & 0xFF) == 0)
-                return exec(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]), cpu_.sreg[ES], cpu_.r[BX]);
-            cpu_.flags |= CF; cpu_.r[AX] = 1; return true;          // other subfunctions unsupported
+        case 0x4B: {                                                // load & execute (AL=0) / load overlay (AL=3)
+            const uint8_t sub = cpu_.r[AX] & 0xFF;
+            const std::string path = read_asciiz(cpu_.sreg[DS], cpu_.r[DX]);
+            if (sub == 0x00) return exec(path, cpu_.sreg[ES], cpu_.r[BX]);
+            if (sub == 0x03) return load_overlay(path, cpu_.sreg[ES], cpu_.r[BX]);
+            cpu_.flags |= CF; cpu_.r[AX] = 1; return true;          // AL=1 (load, no execute) unsupported
+        }
         case 0x4C: terminate(cpu_.r[AX] & 0xFF); return true;       // terminate with return code
         case 0x4D: cpu_.r[AX] = last_child_code_ & 0xFF; return true;  // get child return code
         default:
