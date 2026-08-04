@@ -55,6 +55,16 @@ static constexpr uint16_t kFixedDate = ((1993 - 1980) << 9) | (8 << 5) | 19;
 static constexpr uint16_t kFixedTime = (12 << 11);
 
 bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&, uint16_t);
+std::vector<uint8_t> make_default_env(const std::string& dos_name);
+
+uint16_t Dos::alloc_env(const std::string& dos_name) {
+    const std::vector<uint8_t> b = make_default_env(dos_name);
+    const uint16_t seg = mem_alloc(static_cast<uint16_t>((b.size() + 15) / 16));
+    if (!seg) return 0;
+    for (size_t i = 0; i < b.size(); ++i) mem_.wb(seg, static_cast<uint16_t>(i), b[i]);
+    env_seg = seg;
+    return seg;
+}
 
 // The PSP fields that depend on who launched the program and how much memory it owns.
 // build_psp() in the loader cannot fill these: it knows neither.

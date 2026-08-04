@@ -24,6 +24,11 @@ public:
         install_ivt_stubs();
         dpmi_.get_psp = [this] { return psp_seg; };
         blocks_.push_back({kArenaMcb, static_cast<uint16_t>(heap_end_ - kArenaMcb - 1), 0, false});
+        // The DPMI mode-switch entry and the list-of-lists are inside the arena and are
+        // not free. Marked as DOS's own (owner 8, the convention), so nothing hands them
+        // out and a guest walking the chain sees them for what they are.
+        mem_own(kDpmiEntrySeg, 2);
+        for (Block& b : blocks_) if (b.seg + 1 == kDpmiEntrySeg) b.owner = 8;
         mem_publish();
         dpmi_.alloc_dos = [this](uint16_t paras) { return mem_alloc(paras); };
     }
@@ -49,6 +54,12 @@ public:
     // reads its command tail never looks at these; one that has to find the program
     // that launched it does, and Watcom's W32RUN is exactly that.
     void init_psp(uint16_t psp, uint16_t parent, const std::string& path);
+
+    // Allocate and fill the top-level program's environment block, before load_program()
+    // (which needs the segment for PSP:2Ch). Out of the arena, like every other block,
+    // so it has an MCB: FreeCOM validates the block it is handed against one, and a
+    // block outside the chain is exactly the half-truth it catches.
+    uint16_t alloc_env(const std::string& dos_name);
 
 private:
     uint16_t make_child_env(uint16_t parent_env, const std::string& child_name);
@@ -92,7 +103,10 @@ private:
     // somewhere real. mem_publish() writes it into guest memory after every change.
     struct Block { uint16_t seg, paras, owner; bool used; };
     std::vector<Block> blocks_;                    // contiguous, ordered, covers the arena
-    static constexpr uint16_t kArenaMcb = 0x00FF;  // first MCB; the first PSP is 0x0100
+    // The arena starts just above the IVT stubs (which end at 0x008F) rather than one
+    // paragraph under the first PSP, because the environment block has to be inside it.
+    static constexpr uint16_t kArenaMcb = 0x0090;
+    static constexpr uint16_t kDpmiEntrySeg = 0x00E0;   // ...and the list-of-lists at E1
     uint16_t heap_end_ = 0x9F00;                   // just below the video/BIOS area (~640 KiB)
 
     void     mem_split(uint16_t mcb, uint16_t paras);  // carve `paras` off the front

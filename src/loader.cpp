@@ -12,14 +12,13 @@ namespace dosemu {
 
 bool is_djgpp_coff(const std::vector<uint8_t>&);
 
-// A shared environment block (PATH so the compiler driver finds its passes, and
-// the program's own full path — which a shell like FreeCOM reads to find itself).
-// Below the DPMI entry (0x00E0) and the list-of-lists (0x00E1), in the gap left by the
-// IVT stubs (which end at 0x008F). It used to sit at 0x00F0, 16 paragraphs under the
-// first PSP — which is exactly where the arena's first MCB has to go now, and an
-// environment longer than 240 bytes would have grown into it. There is 1.2 KiB here.
-static constexpr uint16_t kEnvSeg = 0x0090;
-static void build_env(Memory& mem, const std::string& dos_name) {
+// The default environment block's *contents*: PATH so a compiler driver finds its
+// passes, and the program's own full path, which a shell like FreeCOM reads to find
+// itself. Where it goes is not decided here — Dos::alloc_env() allocates it out of the
+// arena like any other block, so that it has an MCB. It used to live at a fixed segment
+// below the first PSP, and once the MCB chain became real that was a block outside the
+// chain, which FreeCOM noticed immediately.
+std::vector<uint8_t> make_default_env(const std::string& dos_name) {
     // DJGPP finds everything else from DJGPP.ENV, so that one variable plus its bin
     // directory on PATH is the whole configuration. LSI C's directory stays first;
     // the two toolchains share no executable names.
@@ -32,12 +31,16 @@ static void build_env(Memory& mem, const std::string& dos_name) {
                            "WATCOM=A:\\",
                            "INCLUDE=A:\\H",
                            nullptr };
-    uint16_t off = 0;
-    for (int i = 0; vars[i]; ++i) { for (const char* p = vars[i]; *p; ++p) mem.wb(kEnvSeg, off++, *p); mem.wb(kEnvSeg, off++, 0); }
-    mem.wb(kEnvSeg, off++, 0);              // end of strings
-    mem.ww(kEnvSeg, off, 1); off += 2;      // count of trailing strings
-    for (char c : dos_name) mem.wb(kEnvSeg, off++, c);
-    mem.wb(kEnvSeg, off, 0);
+    std::vector<uint8_t> b;
+    for (int i = 0; vars[i]; ++i) {
+        for (const char* p = vars[i]; *p; ++p) b.push_back(static_cast<uint8_t>(*p));
+        b.push_back(0);
+    }
+    b.push_back(0);                         // end of strings
+    b.push_back(1); b.push_back(0);         // count of trailing strings
+    for (char c : dos_name) b.push_back(static_cast<uint8_t>(c));
+    b.push_back(0);
+    return b;
 }
 
 static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline, uint16_t env_seg) {
@@ -70,7 +73,7 @@ static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline,
 // and fills the CPU's initial state. Returns true on success.
 bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
                   const std::string& cmdline, std::string& err, const std::string& dos_name,
-                  uint16_t inherit_env) {
+                  uint16_t env_seg) {
     Memory& mem = cpu.mem();
     uint16_t load_seg = psp_seg + 0x10;   // program starts 256 bytes (one PSP) above
 
@@ -89,13 +92,12 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
     // nothing had run before it to leave anything in rhi[].
     for (int i = 0; i < 8; ++i) cpu.rhi[i] = 0;
 
-    // A child launched through EXEC names its own environment block in the parameter
-    // block, and it matters: DJGPP passes command lines longer than the PSP's 126-byte
-    // tail by putting them in an environment variable and sending " !proxy" as the
-    // tail. Rebuild the default environment instead and the child sees an empty command
-    // line -- which is how `gcc` came to invoke `cc1` with no arguments at all.
-    const uint16_t env_seg = inherit_env ? inherit_env : kEnvSeg;
-    if (!inherit_env) build_env(mem, dos_name);
+    // The environment block belongs to whoever allocated it, and the caller always has:
+    // Dos::alloc_env() for the top-level program, make_child_env() for an EXEC child.
+    // Which block a child gets matters: DJGPP passes command lines longer than the PSP's
+    // 126-byte tail by putting them in an environment variable and sending " !proxy" as
+    // the tail, so rebuilding a default environment here would make the child see an
+    // empty command line -- which is how `gcc` came to invoke `cc1` with no arguments.
     build_psp(mem, psp_seg, cmdline, env_seg);
 
     // A DJGPP program is a real-mode DOS stub (go32) wrapping an i386 COFF image, and
