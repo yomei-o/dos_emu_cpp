@@ -49,6 +49,10 @@ public:
     uint32_t dr[8] = {0};
     uint32_t gdt_base = 0, idt_base = 0, ldt_base = 0;
     uint16_t gdt_limit = 0, idt_limit = 0;
+    // The LDT's own limit. A real CPU reads it from the LDT descriptor the GDT holds;
+    // our DPMI host owns the LDT outright and simply says how big it is. Zero means
+    // "unknown", and then nothing is out of range.
+    uint16_t ldt_limit = 0;
     bool gdt_loaded = false;   // an LGDT has actually happened
     uint16_t ldtr = 0, tr = 0;
     // Descriptor cache: base/limit per segment register, and the default-size (D/B)
@@ -130,6 +134,18 @@ public:
         d.big = (d.hi & 0x40) != 0;
         d.present = (d.ar & 0x80) != 0;
         return d;
+    }
+
+    // Whether LAR/LSL can read this selector's descriptor at all. Note what is *not*
+    // part of the test: the present bit. A descriptor slot that has never been filled in
+    // is perfectly accessible, and LAR reports its access rights as zero — which is how
+    // a program looks for a free slot, and DOS/4GW does exactly that. Answering "invalid"
+    // for a valid-but-empty descriptor made it scan all 4096 LDT selectors, find no free
+    // slot anywhere, and exit with status 8 and no message.
+    bool desc_ok(uint16_t sel) const {
+        if (!(sel & 0xFFF8u)) return false;                       // the null descriptor
+        const uint16_t lim = ((sel & 4) || !gdt_loaded) ? ldt_limit : gdt_limit;
+        return !lim || (sel & 0xFFF8u) + 7u <= lim;
     }
 
     // Load a segment register. In protected mode this reads the descriptor from the

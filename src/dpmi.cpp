@@ -36,6 +36,7 @@ Dpmi::Dpmi(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
     };
 
     cpu_.ldt_base = kLdtBase;
+    cpu_.ldt_limit = kLdtCount * 8 - 1;   // so LAR/LSL can say what is out of range
     for (int i = 0; i < 8; ++i) mem_.w8(kLdtBase + i, 0);   // null descriptor
 }
 
