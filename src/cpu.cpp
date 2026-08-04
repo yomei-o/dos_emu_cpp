@@ -52,6 +52,40 @@ void Cpu::bad_sel(int i, uint16_t sel) const {
            nm[i], sel ? "a not-present" : "the null", sel, sreg[CS], ip);
 }
 
+// Port I/O. Only the A20 gate is modelled; everything else reads as zero and ignores
+// writes, as before. Both historical ways of opening the gate are here because a
+// program picks one and gives up if it does not take:
+//
+//   port 0x92 bit 1        the "fast A20" on anything after the PS/2
+//   the keyboard controller  OUT 64h,D1h then OUT 60h,<output port>, bit 1 again --
+//                          A20 hung off a spare pin of the 8042 because that was the
+//                          chip with a line to spare, which is the whole reason this
+//                          is a keyboard controller's job.
+uint8_t Cpu::io_in(uint16_t port) {
+    switch (port) {
+        case 0x92: return a20 ? 0x02 : 0x00;
+        case 0x64: return 0x00;      // 8042 status: both buffers empty, so polls exit
+        case 0x60: return 0x00;
+        default:   return 0x00;
+    }
+}
+
+void Cpu::io_out(uint16_t port, uint8_t v) {
+    static uint8_t kbd_cmd = 0;
+    switch (port) {
+        case 0x92: a20 = (v & 0x02) != 0; break;
+        case 0x64:
+            kbd_cmd = v;
+            if (v == 0xDD) a20 = false;          // some BIOSes take the short way
+            else if (v == 0xDF) a20 = true;
+            break;
+        case 0x60:
+            if (kbd_cmd == 0xD1) { a20 = (v & 0x02) != 0; kbd_cmd = 0; }
+            break;
+        default: break;
+    }
+}
+
 void Cpu::fail(const std::string& msg, uint8_t op) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "%s (opcode 0x%02X) at %04X:%04X", msg.c_str(), op,
@@ -600,14 +634,14 @@ void Cpu::step() {
         case 0xE3: { int8_t rel = static_cast<int8_t>(fetch8()); if (r[CX] == 0) jump(ip + rel); break; }                     // JCXZ
 
         // IN/OUT (no hardware; read 0, ignore writes)
-        case 0xE4: fetch8(); sb(AX, 0); break;
-        case 0xE5: fetch8(); srw(AX, 0); break;
-        case 0xE6: fetch8(); break;
-        case 0xE7: fetch8(); break;
-        case 0xEC: sb(AX, 0); break;
-        case 0xED: srw(AX, 0); break;
-        case 0xEE: break;
-        case 0xEF: break;
+        case 0xE4: { uint8_t p = fetch8(); sb(AX, io_in(p)); break; }              // IN AL, imm8
+        case 0xE5: { uint8_t p = fetch8(); srw(AX, io_in(p) | (io_in(p + 1) << 8)); break; }
+        case 0xE6: { uint8_t p = fetch8(); io_out(p, gb(AX)); break; }              // OUT imm8, AL
+        case 0xE7: { uint8_t p = fetch8(); io_out(p, gb(AX)); io_out(p + 1, r[AX] >> 8); break; }
+        case 0xEC: sb(AX, io_in(r[DX])); break;                                     // IN AL, DX
+        case 0xED: srw(AX, io_in(r[DX]) | (io_in(r[DX] + 1) << 8)); break;
+        case 0xEE: io_out(r[DX], gb(AX)); break;                                    // OUT DX, AL
+        case 0xEF: io_out(r[DX], gb(AX)); io_out(r[DX] + 1, r[AX] >> 8); break;
 
         // Flag ops
         case 0xF5: set_flag(CF, !get_flag(CF)); break;   // CMC

@@ -19,9 +19,14 @@ static void build_env(Memory& mem, const std::string& dos_name) {
     // DJGPP finds everything else from DJGPP.ENV, so that one variable plus its bin
     // directory on PATH is the whole configuration. LSI C's directory stays first;
     // the two toolchains share no executable names.
-    const char* vars[] = { "PATH=A:\\LSIC86\\BIN;A:\\DJGPP\\BIN",
+    // One entry per toolchain, each pointing at where get_fixtures.sh puts it. Each
+    // compiler finds the rest of itself from these: DJGPP from DJGPP.ENV, Watcom from
+    // WATCOM plus INCLUDE, LSI C from PATH alone.
+    const char* vars[] = { "PATH=A:\\LSIC86\\BIN;A:\\DJGPP\\BIN;A:\\BINW",
                            "COMSPEC=A:\\COMMAND.COM",
                            "DJGPP=A:\\DJGPP\\DJGPP.ENV",
+                           "WATCOM=A:\\",
+                           "INCLUDE=A:\\H",
                            nullptr };
     uint16_t off = 0;
     for (int i = 0; vars[i]; ++i) { for (const char* p = vars[i]; *p; ++p) mem.wb(kEnvSeg, off++, *p); mem.wb(kEnvSeg, off++, 0); }

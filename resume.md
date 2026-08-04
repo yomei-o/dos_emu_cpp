@@ -349,6 +349,15 @@ loader → `wcl hello.c` (OpenWatcom parity with the LSI C demo); then scale tow
 FreeCOM's full `wmake` build. Keep LSI C + FreeCOM green throughout (`node
 web/test_shell.mjs`, native `LCC.EXE PROG.C`).
 
+## ⏳ OpenWatcom — the extender runs, the image does not load yet
+
+Written up in **OPENWATCOM.md**: how to assemble the toolchain from the 5 MB component
+zips, that wcc386 is MZ + LX driven by W32RUN (a DPMI client, same shape as go32), how
+far it gets, and the four emulator bugs fixed on the way — a dishonest AH=4Ah, an
+empty interrupt vector table, a missing A20 gate, and a refused AH=63h. New
+diagnostic: **DOSEMU_DOS_TRACE=1** logs every INT 21h call and its answer, which the
+DPMI trace cannot show because a real-mode stub does its DOS work directly.
+
 ## Practical notes
 
 - **Fixtures first on a fresh clone:** `sh get_fixtures.sh djgpp` (see above). Nothing

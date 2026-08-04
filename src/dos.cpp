@@ -1,6 +1,7 @@
 // INT 21h / BIOS service dispatch.
 #include "dos.h"
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <cctype>
@@ -12,6 +13,34 @@ namespace dosemu {
 // hand out the DOS list-of-lists. Nothing else lives between the BIOS data area and
 // the environment at 0x00F0.
 static constexpr uint16_t kLolSeg = 0x00E1;
+
+bool Dos::trace = getenv("DOSEMU_DOS_TRACE") != nullptr;
+
+// The interrupt vector table pointed at nothing, because the emulator services INT
+// through a callback and never consults it. That is fine until a program *reads* a
+// vector and calls it — Watcom's W32RUN takes INT 21h with AH=35h and then far-calls
+// what it got, which was 0000:0000, so it jumped to address zero and marched through
+// low memory until it wandered into the DPMI entry point.
+//
+// So give every vector something real to point at: four bytes per interrupt at
+// 0050:n*4, holding `INT n; IRET`. Executing that stub re-enters the same dispatch the
+// CPU would have used, and the IRET then unwinds the `pushf; call far` frame the
+// caller pushed. 256 * 4 bytes fits exactly in 0x0500-0x08FF, which is free — the IVT
+// and BIOS data end at 0x0500, and the DPMI entry, the list-of-lists and the
+// environment all live at 0x0E00 and above.
+static constexpr uint16_t kIvtStubSeg = 0x0050;
+
+void Dos::install_ivt_stubs() {
+    for (int n = 0; n < 256; ++n) {
+        const uint16_t off = static_cast<uint16_t>(n * 4);
+        mem_.wb(kIvtStubSeg, off + 0, 0xCD);                 // INT n
+        mem_.wb(kIvtStubSeg, off + 1, static_cast<uint8_t>(n));
+        mem_.wb(kIvtStubSeg, off + 2, 0xCF);                 // IRET
+        mem_.wb(kIvtStubSeg, off + 3, 0x90);                 // pad, so n*4 indexes cleanly
+        mem_.w16(n * 4, off);
+        mem_.w16(n * 4 + 2, kIvtStubSeg);
+    }
+}
 
 // One timestamp for every file. Not a real mtime, but the *same* answer from
 // FindFirst and from get-file-time, so a program that cross-checks them agrees.
@@ -161,7 +190,18 @@ bool Dos::handle(uint8_t n) {
                          n, cpu_.sreg[CS], cpu_.ip);
             return true;
         case 0x20: terminate(0); return true;           // terminate program
-        case 0x21: return int21();
+        case 0x21: {
+            if (!trace) return int21();
+            const uint16_t ax = cpu_.r[AX], bx = cpu_.r[BX], cx = cpu_.r[CX], dx = cpu_.r[DX];
+            const bool r = int21();
+            std::fprintf(stderr,
+                "[int21] ah=%02X al=%02X bx=%04X cx=%04X dx=%04X -> %s ax=%04X bx=%04X"
+                "  at %04X:%08X\n",
+                ax >> 8, ax & 0xFF, bx, cx, dx,
+                (cpu_.flags & CF) ? "CF" : "ok", cpu_.r[AX], cpu_.r[BX],
+                cpu_.sreg[CS], cpu_.ip);
+            return r;
+        }
         case 0x16: {                                     // BIOS keyboard services
             uint8_t ah = cpu_.r[AX] >> 8;
             if (ah == 0x00 || ah == 0x10) {              // read a key -> AL=ascii, AH=scancode
@@ -508,6 +548,14 @@ bool Dos::int21() {
             if (ec) { cpu_.flags |= CF; cpu_.r[AX] = 2; } else cpu_.flags &= ~CF;
             return true;
         }
+        // Get the double-byte character set lead-byte table. An *empty* table is the
+        // truthful answer here — this is not a Japanese DOS, so there are no lead
+        // bytes — and it is a real answer rather than an error, which matters because
+        // Watcom's extender stub asks before it will start.
+        case 0x63:
+            for (int i = 0; i < 4; ++i) mem_.wb(kLolSeg, 0x18 + i, 0);   // 0000 terminator
+            cpu_.set_seg(DS, kLolSeg); cpu_.r[SI] = 0x18;
+            cpu_.sb(AX, 0); cpu_.flags &= ~CF; return true;
         case 0x51: case 0x62: cpu_.r[BX] = psp_seg; return true;    // get PSP -> BX
         case 0x50: psp_seg = cpu_.r[BX]; return true;               // set PSP
         // TRUENAME (DS:SI -> ES:DI). gcc canonicalises every path it touches, so this
@@ -525,8 +573,23 @@ bool Dos::int21() {
         }
         case 0x68: case 0x6A: cpu_.flags &= ~CF; return true;       // commit file: we do not buffer
         case 0x4A: {                                                // resize block (ES:block, BX paragraphs)
-            // A startup shrink to free memory for children always succeeds; a grow
-            // is granted up to the arena, which is all the guest needs here.
+            // Saying yes to everything is not the safe answer. The standard way to ask
+            // "how much memory can I have?" is to request 0xFFFF paragraphs and read
+            // the real maximum out of BX when it fails — Watcom's W32RUN does exactly
+            // that. Granting a 1 MiB block it cannot possibly have left it convinced
+            // it owned memory that was not there, and it gave up with
+            // `Fatal error allocating DOS memory`. Report the truth instead.
+            const uint16_t blk = cpu_.sreg[ES];
+            const uint16_t maxpara = blk < heap_end_ ? heap_end_ - blk : 0;
+            if (cpu_.r[BX] > maxpara) {
+                cpu_.flags |= CF; cpu_.r[AX] = 8;                   // INSUFFICIENT MEMORY
+                cpu_.r[BX] = maxpara;                               // ...but this much is free
+                return true;
+            }
+            // A shrink hands the tail back, which is what a program does at startup to
+            // make room for its children. Only meaningful for the block the bump
+            // allocator would hand out next.
+            if (blk + cpu_.r[BX] > heap_next_ || blk >= heap_next_) heap_next_ = blk + cpu_.r[BX];
             cpu_.flags &= ~CF; return true;
         }
         case 0x4B:                                                  // load & execute (AL=0) / load overlay

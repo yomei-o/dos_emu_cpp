@@ -21,6 +21,7 @@ public:
         // INT 31h function 0300h and DOS calls made from protected mode both need to
         // land back in this handler, so the DPMI host reflects through it.
         dpmi_.real_int = [this](uint8_t n) { return handle(n); };
+        install_ivt_stubs();
         dpmi_.get_psp = [this] { return psp_seg; };
         dpmi_.alloc_dos = [this](uint16_t paras) -> uint16_t {
             if (heap_next_ + paras > heap_end_) return 0;
@@ -38,6 +39,11 @@ public:
     DosFiles& files() { return files_; }
 
     bool handle(uint8_t n);
+
+    // DOSEMU_DOS_TRACE=1 logs every INT 21h call and what it answered. The DPMI trace
+    // only sees calls a protected-mode client reflects; a real-mode extender stub does
+    // its DOS work directly, and this is the only way to watch that.
+    static bool trace;
 
 private:
     Cpu& cpu_;
@@ -74,6 +80,7 @@ private:
 
     void out(int fd, char c) { char b = c; if (output) output(fd, &b, 1); }
     int  getch() { int c = input ? input() : -1; return c == '\n' ? '\r' : c; }   // -1 at EOF
+    void install_ivt_stubs();
     bool int21();
     bool int21_default(uint8_t n);
     void terminate(int code);

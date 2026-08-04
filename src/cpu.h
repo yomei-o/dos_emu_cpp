@@ -83,9 +83,18 @@ public:
     // is the A20 line: with the gate off, address bit 20 does not exist and FFFF:0010
     // comes out at 0. A base that came from a descriptor is not a paragraph and is
     // never wrapped.
+    // The A20 gate. Off, address bit 20 does not reach memory and a real-mode address
+    // wraps at 1 MiB — the 8086 behaviour that later software depended on, which is why
+    // the gate exists at all. On, FFFF:0010 and up reach the HMA instead of folding
+    // back to zero. Guests that never touch it (LSI C, DJGPP) leave it off and see
+    // exactly the old behaviour; Watcom's extender refuses to start without it.
+    bool a20 = false;
+    uint8_t io_in(uint16_t port);
+    void io_out(uint16_t port, uint8_t v);
+
     uint32_t lin(int s, uint32_t off) const {
         uint32_t a = sbase[s] + off;
-        if (!pe() && sbase[s] == (static_cast<uint32_t>(sreg[s]) << 4)) a &= 0xFFFFF;
+        if (!pe() && !a20 && sbase[s] == (static_cast<uint32_t>(sreg[s]) << 4)) a &= 0xFFFFF;
         if (watch_hi && s != CS && a >= watch_lo && a <= watch_hi) watch_hit(a, s, off);
         return a;
     }

@@ -64,6 +64,11 @@ bool Dpmi::int2f() {
 void Dpmi::switch_to_pm() {
     const uint16_t ret_ip = mem_.rw(cpu_.sreg[SS], cpu_.r[SP]);
     const uint16_t ret_cs = mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 2);
+    if (trace)
+        printf("[dpmi] mode-switch entry: ax=%04X ss:sp=%04X:%04X stack=%04X %04X %04X %04X\n",
+               cpu_.r[AX], cpu_.sreg[SS], cpu_.r[SP],
+               mem_.rw(cpu_.sreg[SS], cpu_.r[SP]), mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 2),
+               mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 4), mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 6));
     cpu_.r[SP] += 4;
 
     const bool is32 = (cpu_.r[AX] & 1) != 0;
