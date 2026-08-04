@@ -3,9 +3,17 @@
 Working notes for picking the project back up. The README says what the emulator
 *is*; this says what works, what's next, and what was learned.
 
-> **All work is on `main`.** Protected mode and the DPMI host are in and
-> regression-green: 32-bit DJGPP programs load and run. The one thing missing is
-> **argv** — see "The gap: argc == 0". That is where to pick up.
+> **All work is on `main`**, except the parked MCB chain on `wip-mcb-chain`.
+> Protected mode and the DPMI host are in and regression-green: DJGPP compiles C and
+> C++, and so do the three Watcom compilers. Two threads to pick up:
+>
+> 1. **The Watcom linker.** `wlink` is stubbed for DOS/4GW. On `wip-mcb-chain` — which
+>    gives conventional memory a real MCB chain — DOS/4GW gets all the way into its own
+>    32-bit startup and stops on INT 31h **0305h** and **0306h**. That branch costs the
+>    shell demo (FreeCOM validates the environment block against an MCB, and the
+>    top-level environment lives outside the arena), and the fix is named in
+>    `OPENWATCOM.md`. Merge it, then write those two functions.
+> 2. **argv** — see "The gap: argc == 0" below.
 
 ## State (all verified, on the browser build too)
 
@@ -13,11 +21,13 @@ An 8086/80386 MS-DOS emulator in C++/WebAssembly — 16-bit real mode, plus 32-b
 protected mode with a built-in DPMI host for DOS-extended programs.
 
 - **8086 core** (`src/cpu.cpp`): integer subset + string ops + shifts + MUL/DIV;
-  x87 escapes (D8-DF) are consumed as no-ops (LSI C uses software float). A runaway
+  the x87 stack (`src/fpu.cpp`); LAR/LSL, BOUND, the A20 gate, and protected-mode
+  interrupt dispatch through the guest's own IDT with a TSS stack switch. A runaway
   guard (`Cpu::max_insns`) stops rather than hanging the tab.
 - **DOS** (`src/dos.cpp`): INT 21h — console + line input, file I/O (handles, DTA,
-  FindFirst/Next with DOS 8.3 wildcards), memory (48/49/4A bump alloc), **EXEC
-  (4Bh)** run children on the same CPU via a nested loop, mkdir/rmdir, chdir/getcwd
+  FindFirst/Next with DOS 8.3 wildcards), memory (48/49/4Ah over a real block list
+  with a free that frees), **EXEC (4Bh)** run children on the same CPU via a nested
+  loop, **load overlay (4Bh AL=03)**, mkdir/rmdir, chdir/getcwd
   with a **persistent current directory**, country-info fallback (NLS), INT 16h/2Fh.
 - **Loader** (`src/loader.cpp`): .COM and .EXE (MZ) with relocations, PSP, an
   environment block carrying the program's own path + PATH/COMSPEC.
