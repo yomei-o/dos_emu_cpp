@@ -278,33 +278,37 @@ sometimes copies its own segment registers in instead — DOS/4GW does, for the 
 write. Where such a selector describes conventional memory at a paragraph boundary the two
 are the same address said two ways, so the frame load says it the way real mode needs.
 
-**Output flows for the first time**, and it is not yet readable. The message is
+**Output flows for the first time**, and it is not readable — but the reason is now a
+measurement rather than a guess. The message is
 
     DOS/16M error: <29 bytes> '<18 bytes>'
 
-with the pieces at image offsets 0x0E18, 0x0AC4, 0x12E0, 0x0ACD, 0x1190, 0x0AD0, 0x0AAC —
-`dos4gw.exe` on disk confirms the first two are `DOS/16M` and ` error: `, and a watchpoint
-confirms DOS/4GW fills the 29-byte slot in just before it writes. So the text exists and is
-correct in memory.
+with the pieces at data-segment offsets 0x0E18, 0x0AC4, 0x12E0, 0x0ACD, 0x1190, 0x0AD0 and
+0x0AAC; `dos4gw.exe` on disk confirms the first two are `DOS/16M` and ` error: ` at exactly
+those offsets in its image. Exactly 67 bytes come out, which is the sum of the seven
+lengths, so every write lands. What comes out is not text:
 
-What is wrong is one instruction wide, and it is written down here because it is exactly
-reproducible:
+    8c00 0000 3700 8dcf cfcf cfcf cfcf cf58
+    0100 0037 0059 0100 0037 005a 0100 0037
 
-    [dpmi]60264 real-mode call 0050:0084 (iret frame) ax=40AC ds=0110(00001100) dx=0AAC
-    [int21]60265 ah=40 al=AC bx=0002 cx=0002 ds:dx=003F:0AAC es=0027 at 0050:00000086
+Six-byte records: a 32-bit offset and a 16-bit selector. **DOS/4GW has written its saved
+protected-mode interrupt vector table over its own message strings** — 256 entries, 1536
+bytes, straight across the region the strings occupy in the same data segment. (Selector
+0x0037 and offsets 0x0080+n are our default handlers, so the records are ours; with 0204h
+reporting 0:0 instead, the same region comes out as `CF` filler. Either way the strings are
+gone, so this is not something our answer caused.)
 
-`rm_call` sets DS to paragraph 0110 (base 0x1100, where the message is) and jumps to our
-IVT stub at `0050:0084`. **One instruction later**, the `INT 21h` in that stub reaches the
-DOS layer with DS = 003F — the client's flat selector, used as a paragraph, pointing at
-0x3F0. Nothing between those two points loads DS: the only instruction executed is the
-`INT` itself, `Cpu::interrupt` does not touch DS, and `SegAlias` leaves it alone in real
-mode (and `pe()` is false, confirmed by the absence of a `pm:` line). The only code in the
-emulator that writes `sreg[]` without `set_seg` is `Cpu::restore()`, which means something
-is running `rm_return()` early — but its hook is at linear 0xE51 and `lin(CS,ip)` at the
-stub is 0x584.
+A watchpoint confirms the addressing is right on our side: the write reads through DS =
+paragraph 0110, base 0x1100, which is where the overlay put the image, and `set_seg` shows
+that value being loaded by `rm_call` and nothing changing it before the `INT`. So the
+strings *were* at those addresses and something overwrote them.
 
-That is a contradiction between two things that cannot both be true, which makes it the
-good kind of bug. A watchpoint on `sreg[DS]` in the host would settle it in one run.
+Which means the remaining question is not about the host at all: DOS/4GW is writing a table
+into memory it believes is scratch and which actually holds its own strings. Either its
+data segment is meant to be somewhere else by then — its code has relocated to segment
+0x5CA — or the table pointer it computes depends on something we set up differently. That
+is a question about DOS/4GW's own layout, answerable by watching where it decides the table
+goes, and it is the last thing between here and reading the error it wants to report.
 
 ### Where the linker actually stands
 

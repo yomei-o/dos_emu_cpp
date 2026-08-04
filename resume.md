@@ -13,14 +13,15 @@ Working notes for picking the project back up. The README says what the emulator
 >    `scratch_root/fp.c`, which `get_fixtures.sh djgpp` writes:
 >    `H10=2.928968 sqrt2=1.414214 sin1=0.841471`. Getting there took two fixes, both
 >    worth knowing about, in "The x87 was wrong twice" below.
-> 2. **The Watcom linker**, if it is worth it. `wlink` is stubbed for DOS/4GW, and
->    DOS/4GW now runs: it walks the MCB chain, takes all of memory, hooks INT 21h and INT
->    31h, forwards INT 31h to us correctly, enters 32-bit protected mode, executes about
->    80,000 instructions and then exits with status 8 having printed nothing. **No DPMI
->    function fails any more** bar `0A00h`, which every client probes. So it is one silent
->    decision inside a 259 KiB extender rather than a list of gaps — findable, but
->    open-ended. `OPENWATCOM.md` weighs it against writing the OMF linker ourselves, which
->    is looking better by comparison.
+> 2. **The Watcom linker**, if it is worth it. DOS/4GW runs its whole startup, hooks INT
+>    21h and INT 31h, reflects DOS calls through INT 31h **0302h** (implemented now), and
+>    its output reaches the console. It still exits 8, and the message it is trying to
+>    print — `DOS/16M error: ...` — comes out as its own saved interrupt-vector table,
+>    because DOS/4GW writes that table over its own message strings. **No DPMI function
+>    fails any more** bar `0A00h`, which every client probes. So what is left is one
+>    question about DOS/4GW's internal layout, not about the host; `OPENWATCOM.md` has the
+>    hex dump and the measurements, and weighs it against writing the OMF linker
+>    ourselves, which is looking better by comparison.
 >
 > **Fixed since the last note:** `Coprocessor not present and DPMI setup failed!` is gone
 > from every DJGPP program — it was INT 31h **0303h** (real-mode callbacks) all along,
