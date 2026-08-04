@@ -33,9 +33,10 @@ account.
                   relocs                                            BIOS INT 10h/16h
 ```
 
-- **CPU** (`src/cpu.cpp`): a 16-bit 8086 real-mode interpreter — segmented
-  addressing (`physical = segment*16 + offset`), the ALU/`MOV`/stack/`Jcc`/string
-  groups, `ModRM` 16-bit addressing modes, and `INT n`.
+- **CPU** (`src/cpu.cpp`): an 8086/80386 interpreter — segmented addressing
+  (`physical = segment*16 + offset`) and, in protected mode, descriptor bases; the
+  ALU/`MOV`/stack/`Jcc`/string groups, `ModRM` 16- and 32-bit addressing, `INT n`, the
+  x87 (`src/fpu.cpp`), and the whole one-byte integer map down to the BCD adjusts.
 - **DOS** (`src/dos.cpp`): the `INT 21h` service layer — console and file I/O,
   memory allocation, the PSP and command line, and **program load & execute**
   (`AH=4Bh`), which is what lets the compiler driver spawn its passes.

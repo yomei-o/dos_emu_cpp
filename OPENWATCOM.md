@@ -431,6 +431,47 @@ C++ too, through `wpp386` and `plib3r.lib`. So a 32-bit protected-mode program, 
 *and linked* inside the emulator by the Watcom tools, running under DOS/4GW, which is
 itself running as a client of the built-in DPMI host.
 
+### OpenWatcom v2 runs too, and the thing in the way was our own cleverness
+
+`load_frame()` used to convert a value in the real-mode call structure's segment field from
+a selector to the paragraph it covers, on the theory that a client reflecting a call it
+received in protected mode might copy its own segment registers straight in. **That cannot
+be made to work, because a paragraph and a selector are the same sixteen bits.** DOS/4GW
+puts the paragraph `0x018F` there, exactly as the spec says it should; `0x018F & 4` is set,
+and LDT slot 49 happened to hold a live descriptor with base `0xE1E0`, so an `open` went to
+`0xE1E0 + 0x2380` and DOS/4GW said `can't find file A:\WCC.EXE to load` about a file that
+was right there. Requiring the present bit only moved the failure: while the slot was empty
+it read as base 0, which is where the garbled `DOS/16M error: ...` came from.
+
+The conversion was introduced when the linker printed nothing at all, and it did make that
+better — but what was actually wrong was elsewhere, and is now fixed: the `CF` result
+discarded by `rm_return()`'s IRET, the arena holes that misplaced DOS/4GW's transfer buffer,
+and `LODSB` clobbering `AH`. With those gone the frame can be taken literally, which is both
+simpler and what the spec says. Every Watcom path stays green, and:
+
+    ./dosemu --root v2 v2/wcc.exe hello.c            # OpenWatcom v2's own compiler
+    hello.c: 11 lines, included 479, 0 warnings, 0 errors
+    Code size: 35
+    ./dosemu --root v2 v2/binw/wlink.exe "system dos file hello.obj name hello.exe"
+    ./dosemu --root v2 v2/hello.exe   ->  hello from Watcom C, sum=55
+
+(`v2` here is anything unpacked out of the OpenWatcom v2 DOS installer, which is an
+ordinary zip.) If a client ever really does put a selector in that field, the answer is to
+fail the call, not to guess which of two meanings a number has.
+
+### The emulator must not die on a filename
+
+A guest that has jumped into data passes machine code where a filename should be, and
+constructing an `fs::path` from a narrow string converts it through the host's active code
+page — which *throws* on bytes that page cannot decode. On a Japanese (cp932) Windows a lone
+`0x8B` is enough, and the emulator exited with no message at all, which reads as a hang or a
+silent crash rather than as a bad filename. `host_path()` now catches it and returns a name
+nothing can open, and the whole `INT 21h` dispatch is inside a `try` that answers "not
+found" — `CpuError` deliberately excepted, since that is the emulator's own report and
+belongs to `main()`. Turning that crash into an error is what let DOS/4GW print
+`fatal error (1007): can't find file A:\WCC.EXE to load`, which is the message that
+identified the bug above.
+
 ### Three more emulator bugs, found by the last items on the list
 
 - **`LODSB` was clobbering `AH`.** The byte form loads AL and must leave AH alone; ours
@@ -468,9 +509,15 @@ longer necessary, though `src/coff_loader.cpp` is still the model if anyone want
   executable. Feeding it the parent's path made it read `wcc386.exe` at W32RUN's offsets
   and jump into the middle of data, which is how `BOUND` and the `0x82` alias turned up
   as "unimplemented instructions".
-- **`INS`/`OUTS` (`6Ch`-`6Fh`) are still unimplemented.** They only ever turned up while
-  a loader was executing data, so they block nothing — but they are real 80186
-  instructions and the CPU should have them.
+- **The one-byte opcode map is complete for the integer set.** `INS`/`OUTS`, `XLAT`,
+  `BOUND`, `ARPL`, the `0x82` alias, and — added last — the BCD adjust group
+  (`DAA`/`DAS`/`AAA`/`AAS`/`AAM`/`AAD`), `SALC` and `ICEBP`. No compiler emits the BCD ones,
+  so the only way to reach them is to write them down: `scratch_root/bcd.c`, which
+  `get_fixtures.sh djgpp` writes, checks all six against the values the SDM fixes
+  (`19+28=47`, `41-28=13`, `0Fh -> 1:5`, `21-2 -> 1:9`, `14 -> 1:4`, `1:4 -> 14`) and is
+  compiled by DJGPP inside the emulator. They matter for a reason beyond completeness: they
+  are what a guest lands on when it starts executing data, and `unimplemented instruction
+  0x27` (DAA) reads as a missing feature when it is really a wild jump.
 - **A DPMI client that issues `INT 21h` directly** gets its DS/ES selectors aliased to the
   paragraph they cover, for the duration of the call, when the base is in conventional
   memory. That is what a real host does and the only case one can do anything for; it is

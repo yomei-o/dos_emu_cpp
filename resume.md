@@ -71,19 +71,42 @@ Working notes for picking the project back up. The README says what the emulator
 > 5. **`AH=5Dh` and `AH=66h`** answer honestly (invalid function) instead of falling through
 >    to the "unimplemented" message. Every caller has a fallback and takes it.
 >
-> **What to pick up.** All optional:
+> **And then the last three, which are also done:**
 >
-> 1. **OpenWatcom v2's binaries get further and still do not finish.** With `LODSB` fixed
->    the stub finds `dos4gw.exe`, DOS/4GW prints its banner and loads the v2 image, then
->    stops at a reflected `open` whose pointer is code rather than a filename. The same
->    signature appears for a 32-bit `.EXE` linked with *v2's* 512-byte `wstub.exe`, so the
->    suspect is that stub (a different extender's) rather than the image. 11.0c's stub is
->    what works.
-> 2. **`INS`/`OUTS`, and the rest of the "only seen while executing data" list** in
->    `OPENWATCOM.md`'s closing notes.
-> 3. **The x87 computes correctly** through libm and `printf("%f")` — `scratch_root/fp.c`,
->    which `get_fixtures.sh djgpp` writes. Two fixes, both worth knowing about, in "The x87
->    was wrong twice" below.
+> - **OpenWatcom v2's own DOS toolchain runs** — its `wcc` compiles and its `wlink` links,
+>   inside the emulator. What was in the way was our own cleverness: `load_frame()` tried to
+>   recognise a selector in the real-mode call structure's segment field and substitute the
+>   paragraph it covers. **A paragraph and a selector are the same sixteen bits**, so that is
+>   not a decidable question: DOS/4GW's correct paragraph `0x018F` was read as a live
+>   descriptor with base `0xE1E0`, and it reported `can't find file A:\WCC.EXE to load` about
+>   a file that was there. The conversion was a workaround for bugs since fixed (the lost
+>   `CF`, the arena holes, `LODSB`); taking the frame literally is simpler, matches the spec,
+>   and keeps every Watcom path green.
+> - **The emulator no longer dies on a filename.** A guest that has jumped into data passes
+>   machine code where a name should be, and building an `fs::path` from it throws under a
+>   DBCS code page (cp932). It exited with no message, which reads as a hang. `host_path()`
+>   catches it, and the whole INT 21h dispatch is inside a `try` that answers "not found"
+>   (`CpuError` excepted — that one is ours and belongs to `main()`). That is what let
+>   DOS/4GW print the message that identified the bug above.
+> - **The one-byte opcode map is complete for the integer set**: the BCD adjust group
+>   (`DAA`/`DAS`/`AAA`/`AAS`/`AAM`/`AAD`), plus `SALC` and `ICEBP`. `scratch_root/bcd.c`,
+>   which `get_fixtures.sh djgpp` writes, checks all six against the values the SDM fixes and
+>   is compiled by DJGPP inside the emulator. `INS`/`OUTS`/`XLAT`/`BOUND`/`ARPL`/`0x82` were
+>   already there; `OPENWATCOM.md` said otherwise and was out of date.
+>
+> **What to pick up.** Nothing is outstanding. Ideas, in rough order of interest:
+>
+> 1. **`wmake`, and building something real** — FreeCOM itself is the obvious target, since
+>    that is what the Watcom tools were brought up for.
+> 2. **A `watcom.tar.gz` with no version mix.** The bundle is 11.0c binaries plus four
+>    OpenWatcom v2 libraries (`web/WATCOM-LICENSE.md` says why). Now that v2's own binaries
+>    run, an all-v2 bundle would be one provenance instead of two — at the cost of depending
+>    on the 128 MB installer rather than the documented component zips.
+> 3. **32-bit output in the browser demo.** `system dos4g` works natively; the bundle carries
+>    only the 16-bit libraries and would need `clib3r`/`plib3r`/`math387r` and `dos4gw.exe`
+>    added, about 1 MB gzipped.
+> 4. **The x87 computes correctly** through libm and `printf("%f")` — `scratch_root/fp.c`.
+>    Two fixes worth knowing about, in "The x87 was wrong twice" below.
 
 ## State (all verified, on the browser build too)
 

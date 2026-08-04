@@ -626,7 +626,14 @@ bool Dos::handle(uint8_t n) {
             return true;
         case 0x20: terminate(0); return true;           // terminate program
         case 0x21: {
-            if (!trace) return int21();
+            // Nothing a guest can pass may take the emulator down. The DOS layer reaches the
+            // host filesystem, and a filename made of machine code (which is what a guest
+            // that has jumped into data passes) can throw out of <filesystem> rather than
+            // simply failing. A DOS call that goes wrong returns an error; it does not exit.
+            // CpuError is deliberately not caught here: that is the emulator's own report of
+            // an instruction it cannot run, and it belongs to main().
+            try {
+                if (!trace) return int21();
             const uint16_t ax = cpu_.r[AX], bx = cpu_.r[BX], cx = cpu_.r[CX], dx = cpu_.r[DX];
             const uint16_t es = cpu_.sreg[ES], ds0 = cpu_.sreg[DS];   // captured at entry: a
             // handler may legitimately change them, and printing the value afterwards made a
@@ -662,6 +669,11 @@ bool Dos::handle(uint8_t n) {
             if (pm) std::fprintf(stderr, "[int21]   pm: ds base=%08X edx=%08X -> %08X\n",
                                  dsb, edx, dsb + edx);
             return r;
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[dos] INT 21h AH=%02Xh failed: %s\n", cpu_.r[AX] >> 8, e.what());
+                cpu_.flags |= CF; cpu_.r[AX] = 2;            // file not found, the DOS answer
+                return true;
+            }
         }
         case 0x16: {                                     // BIOS keyboard services
             uint8_t ah = cpu_.r[AX] >> 8;

@@ -635,6 +635,64 @@ void Cpu::step() {
         case 0x9E: flags = (flags & 0xFF00) | (r[AX] >> 8); break;                  // SAHF
         case 0x9F: r[AX] = (r[AX] & 0x00FF) | ((flags & 0xFF) << 8); break;         // LAHF
 
+        // ---- the BCD adjust group -------------------------------------------------
+        // Packed (DAA/DAS) and unpacked (AAA/AAS/AAM/AAD) decimal fixups. A C compiler
+        // never emits them, which is why nothing here needed them for four toolchains —
+        // but they are as much part of the 8086 integer set as ADD is, and they are the
+        // instructions a guest lands on first when it starts executing data: `0x27` (DAA)
+        // is the byte the runaway linker died on, and reading "unimplemented instruction
+        // 0x27" as a missing feature rather than as a wild jump cost real time. Straight
+        // from the SDM pseudocode, including the two places where the second `IF` has no
+        // `ELSE` and so leaves CF as the first one set it.
+        case 0x27: case 0x2F: {                                                     // DAA / DAS
+            const bool sub = (op == 0x2F);
+            const uint8_t old_al = gb(AX);
+            const bool old_cf = get_flag(CF);
+            set_flag(CF, false);
+            uint8_t al = old_al;
+            if ((al & 0x0F) > 9 || get_flag(AF)) {
+                const uint16_t t = sub ? static_cast<uint16_t>(al - 6) : static_cast<uint16_t>(al + 6);
+                al = static_cast<uint8_t>(t);
+                set_flag(CF, old_cf || (t & 0x100) != 0);     // carry out, or borrow in
+                set_flag(AF, true);
+            } else set_flag(AF, false);
+            if (old_al > 0x99 || old_cf) {
+                al = static_cast<uint8_t>(sub ? al - 0x60 : al + 0x60);
+                set_flag(CF, true);
+            }
+            sb(AX, al);
+            set_flag(ZF, al == 0); set_flag(SF, (al & 0x80) != 0); set_flag(PF, parity(al));
+            break; }
+        case 0x37: case 0x3F: {                                                     // AAA / AAS
+            const bool sub = (op == 0x3F);
+            uint8_t al = gb(AX), ah = gb(4 /*AH*/);
+            if ((al & 0x0F) > 9 || get_flag(AF)) {
+                al = static_cast<uint8_t>(sub ? al - 6 : al + 6);
+                ah = static_cast<uint8_t>(sub ? ah - 1 : ah + 1);
+                set_flag(AF, true); set_flag(CF, true);
+            } else { set_flag(AF, false); set_flag(CF, false); }
+            al &= 0x0F;
+            sb(AX, al); sb(4, ah);
+            set_flag(ZF, al == 0); set_flag(SF, (al & 0x80) != 0); set_flag(PF, parity(al));
+            break; }
+        case 0xD4: {                                                                // AAM imm8
+            const uint8_t div = fetch8();
+            if (!div) { interrupt(0); break; }                 // divide error, as on hardware
+            const uint8_t al = gb(AX);
+            sb(4, static_cast<uint8_t>(al / div));             // AH = quotient
+            sb(AX, static_cast<uint8_t>(al % div));            // AL = remainder
+            const uint8_t r8v = gb(AX);
+            set_flag(ZF, r8v == 0); set_flag(SF, (r8v & 0x80) != 0); set_flag(PF, parity(r8v));
+            break; }
+        case 0xD5: {                                                                // AAD imm8
+            const uint8_t mul = fetch8();
+            const uint8_t al = static_cast<uint8_t>(gb(AX) + gb(4) * mul);
+            sb(AX, al); sb(4, 0);
+            set_flag(ZF, al == 0); set_flag(SF, (al & 0x80) != 0); set_flag(PF, parity(al));
+            break; }
+        case 0xD6: sb(AX, get_flag(CF) ? 0xFF : 0x00); break;   // SALC (undocumented, but real)
+        case 0xF1: interrupt(1); break;                         // ICEBP / INT1
+
         // MOV AL/eAX <-> moffs
         case 0xA0: { uint32_t o = a32 ? fetch32() : fetch16(); int si = d.have_ovr ? d.seg_ovr_idx : DS; sb(AX, mem_.r8(lin(si, o))); break; }
         case 0xA1: { uint32_t o = a32 ? fetch32() : fetch16(); int si = d.have_ovr ? d.seg_ovr_idx : DS; uint32_t base = lin(si, o); srw(AX, o32 ? mem_.r32(base) : mem_.r16(base)); break; }

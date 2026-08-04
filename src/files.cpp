@@ -36,8 +36,18 @@ std::string DosFiles::host_path(const std::string& dos_path) {
         rel = cw; if (rel.empty() || rel.back() != '/') rel += '/'; rel += p;
     }
     // Build the host path component by component, matching case-insensitively.
+    //
+    // Inside a try, because constructing an fs::path from a narrow string converts it
+    // through the host's active code page, and that *throws* on bytes the code page cannot
+    // decode — on a Japanese (cp932) Windows, a lone 0x8B is enough. A guest can pass any
+    // bytes it likes as a filename, and one that has started executing data passes machine
+    // code: DOS/4GW handed us `j\x04\x8bF\x04\x8bV\x06...` and the emulator died with no
+    // message at all, which reads as a hang or a silent exit rather than a bad filename.
+    // Whatever cannot be turned into a path cannot name a file either, so answer the way
+    // DOS does — with "not found" — and let the guest deal with it.
     fs::path host = root_;
     std::string cur;
+    try {
     auto step = [&](const std::string& name) {
         if (name.empty() || name == ".") return;
         std::error_code ec;
@@ -59,6 +69,9 @@ std::string DosFiles::host_path(const std::string& dos_path) {
         else cur += rel[i];
     }
     return host.string();
+    } catch (const std::exception&) {
+        return root_ + "/\x01";        // a name no filesystem will open, and none will crash on
+    }
 }
 
 std::string DosFiles::normalize(const std::string& in) const {

@@ -260,32 +260,31 @@ void Dpmi::load_frame(uint32_t f) {
     cpu_.sd(DX, mem_.r32(f + 0x14)); cpu_.sd(CX, mem_.r32(f + 0x18));
     cpu_.sd(AX, mem_.r32(f + 0x1C));
     cpu_.flags = mem_.r16(f + 0x20);
-    // The segment fields are meant to hold real-mode paragraphs. A client reflecting a
-    // call it received in protected mode sometimes copies its own segment registers
-    // straight in — DOS/4GW does, for the DS of a write — and then the paragraph is a
-    // selector. Where that selector describes conventional memory at a paragraph
-    // boundary, the two are the same address said two ways, so say it the way real mode
-    // needs. Anything else is passed through untouched: a base above 1 MiB has no
-    // paragraph, and inventing one would be worse than the call failing.
-    // The descriptor has to be **present**, and that is the whole difference between this
-    // working and quietly destroying the frame. `desc_ok()` deliberately accepts an empty
-    // LDT slot — that is how a client finds a free one — so without the present bit any
-    // paragraph with bit 2 set that happens to index an unused slot reads back as base 0
-    // and gets "converted" to segment 0. DOS/4GW puts the paragraph 0x018F in the frame,
-    // exactly as the spec says it should; 0x018F & 4 is set, slot 49 was empty, and its
-    // error message came out of address 0x0E18 instead of 0x18F0 + 0x0E18. A number that
-    // does not name a live descriptor is not a selector.
-    auto as_paragraph = [&](uint16_t v) -> uint16_t {
-        if (!(v & 4) || !cpu_.desc_ok(v)) return v;          // not an LDT selector
-        const Cpu::Desc d = cpu_.read_desc(v);
-        if (!d.present) return v;                            // an empty slot is not a selector
-        if (d.base >= 0x100000 || (d.base & 0xF)) return v;
-        return static_cast<uint16_t>(d.base >> 4);
-    };
-    cpu_.set_seg(ES, as_paragraph(mem_.r16(f + 0x22)));
-    cpu_.set_seg(DS, as_paragraph(mem_.r16(f + 0x24)));
-    cpu_.set_seg(FS, as_paragraph(mem_.r16(f + 0x26)));
-    cpu_.set_seg(GS, as_paragraph(mem_.r16(f + 0x28)));
+    // The segment fields hold real-mode paragraphs, and this takes them at their word.
+    //
+    // It used to try to be helpful: if the value looked like one of our LDT selectors and
+    // its descriptor covered conventional memory, it substituted base>>4, on the theory
+    // that a client reflecting a call it received in protected mode might copy its own
+    // segment registers straight in. **That cannot be made to work, because a paragraph and
+    // a selector are the same sixteen bits.** DOS/4GW puts the paragraph 0x018F in the
+    // frame, exactly as the spec says it should; 0x018F & 4 is set, and slot 49 happened to
+    // be a live descriptor with base 0xE1E0, so the substitution sent an `open` to
+    // 0xE1E0 + 0x2380 and DOS/4GW reported `can't find file A:\WCC.EXE to load` about a file
+    // that was right there. Adding a present-bit check only moved the failure: while the
+    // slot was empty it read as base 0 and the garbled `DOS/16M error: ...` message came out
+    // of linear 0x0E18 instead of 0x18F0 + 0x0E18.
+    //
+    // The conversion was introduced when the linker printed nothing at all, and it did make
+    // that better — but what was actually wrong was elsewhere and is fixed: the CF result
+    // discarded by rm_return()'s IRET, the arena holes that misplaced DOS/4GW's transfer
+    // buffer, and LODSB clobbering AH. With those gone, taking the frame literally is both
+    // simpler and what the spec says, and it is what lets OpenWatcom v2's own DOS binaries
+    // run. If a client ever really does put a selector here, the answer is to fail the call,
+    // not to guess which of the two meanings a number has.
+    cpu_.set_seg(ES, mem_.r16(f + 0x22));
+    cpu_.set_seg(DS, mem_.r16(f + 0x24));
+    cpu_.set_seg(FS, mem_.r16(f + 0x26));
+    cpu_.set_seg(GS, mem_.r16(f + 0x28));
 }
 
 void Dpmi::store_frame(uint32_t f) { store_frame(f, cpu_.flags); }

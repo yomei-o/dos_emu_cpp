@@ -101,7 +101,41 @@ int main(void)
 	return 0;
 }
 FPEOF
-    echo "   wrote scratch_root/hello.c, scratch_root/mini.cpp and scratch_root/fp.c"
+    # The BCD adjust group. No compiler emits DAA/AAM, so the only way to reach them is to
+    # write them down -- and they are the instructions a guest lands on first when it starts
+    # executing data, which is how `unimplemented instruction 0x27` once got read as a
+    # missing feature rather than as a wild jump. Every expected value is fixed by the SDM.
+    crlf scratch_root/bcd.c <<'BCDEOF'
+#include <stdio.h>
+
+int main(void)
+{
+	unsigned short r;
+
+	__asm__ volatile ("movb $0x19,%%al; addb $0x28,%%al; daa; movzbw %%al,%0"
+	                  : "=r"(r) :: "eax");
+	printf("daa 19+28 = %02X (want 47)\n", r);
+
+	__asm__ volatile ("movb $0x41,%%al; subb $0x28,%%al; das; movzbw %%al,%0"
+	                  : "=r"(r) :: "eax");
+	printf("das 41-28 = %02X (want 13)\n", r);
+
+	__asm__ volatile ("movw $0x000F,%%ax; aaa; movw %%ax,%0" : "=r"(r) :: "eax");
+	printf("aaa 000F  = %04X (want 0105)\n", r);
+
+	__asm__ volatile ("movw $0x0201,%%ax; subb $2,%%al; aas; movw %%ax,%0" : "=r"(r) :: "eax");
+	printf("aas 21-2  = %04X (want 0109)\n", r);
+
+	__asm__ volatile ("movb $14,%%al; aam; movw %%ax,%0" : "=r"(r) :: "eax");
+	printf("aam 14    = %04X (want 0104)\n", r);
+
+	__asm__ volatile ("movw $0x0104,%%ax; aad; movw %%ax,%0" : "=r"(r) :: "eax");
+	printf("aad 0104  = %04X (want 000E)\n", r);
+
+	return 0;
+}
+BCDEOF
+    echo "   wrote scratch_root/hello.c, mini.cpp, fp.c and bcd.c"
 fi
 
 if [ "$1" = "ow" ]; then
