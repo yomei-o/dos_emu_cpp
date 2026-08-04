@@ -12,6 +12,12 @@ R86 → LLD`) compile it to a DOS `.EXE`, and then run that `.EXE` — all in a 
 tab via WebAssembly. `lsic330c.lzh` in this repo is the LSI C-86 3.30 trial
 distribution the demo drives.
 
+That goal is met, and the emulator has since grown a 32-bit half: an 80386 core,
+protected mode, and a DPMI host of its own, which is enough to run **DJGPP** — so the
+same page can hand a `.c` or a `.cpp` to a real `gcc`/`g++` and run the 32-bit
+executable that comes out. The DJGPP archives are in `upstream/`, unmodified, with
+`web/DJGPP-LICENSE.md` recording their GPL terms and source URLs.
+
 ## How it works (same shape as the sibling project)
 
 ```
@@ -33,9 +39,19 @@ Anything unimplemented stops with a message naming the opcode or `INT` function 
 the address, so bringing up a new guest is a matter of following the messages —
 the same method used for the sibling emulator.
 
-## 🕹 Live demo — [**yomei-o.github.io/dos_emu_cpp**](https://yomei-o.github.io/dos_emu_cpp/)
-Edit C, press **Compile & Run**: LSI C-86 compiles it (spawning its passes as DOS
-programs) into a DOS `.EXE`, which then runs — all in the browser tab.
+## 🕹 Live demos
+
+**[16-bit — FreeDOS + LSI C-86](https://yomei-o.github.io/dos_emu_cpp/)**
+A FreeDOS `COMMAND.COM` prompt. Edit C, press **Compile & Run**: LSI C-86 compiles it
+(spawning its passes as DOS programs) into a DOS `.EXE`, which then runs.
+
+**[32-bit — DJGPP gcc / g++](https://yomei-o.github.io/dos_emu_cpp/web/djgpp.html)**
+The same emulator with its built-in **DPMI host**, running DJGPP's real gcc 3.4.6.
+Compile C *or* C++ to a 32-bit protected-mode `.EXE` and run it — 2.0 s for C, 3.5 s
+for C++ in wasm. The page drives the four passes itself (`cc1` → `as` → `ld` →
+`stubify`) and will show you the assembly gcc produced.
+
+Both are static pages; nothing leaves the browser.
 
 ## Status
 
@@ -44,6 +60,9 @@ programs) into a DOS `.EXE`, which then runs — all in the browser tab.
 3. ✅ `INT 21h AH=4Bh` EXEC (child processes) → the full `LCC` pipeline
 4. ✅ compile a `.c` to `.EXE` and run it (`hello from LSI C!`)
 5. ✅ WebAssembly build + browser demo (edit a `.c`, compile & run in the page)
+6. ✅ 80386 core + protected mode + a built-in **DPMI host** → DOS-extended programs run
+7. ✅ **DJGPP gcc and g++** compile C and C++ to 32-bit `.EXE`s, in the browser too
+8. ⏭ OpenWatcom (an MZ + **LE** image, DOS/4GW) — needs an LE loader
 
 ## Building
 
