@@ -40,6 +40,20 @@ if [ "$1" = "djgpp" ]; then
     fi
     for p in djecho stubify dtou getconf; do cp djgpp/bin/$p.exe scratch_root/; done
     echo "   djecho/stubify/dtou/getconf -> scratch_root/ (i386 COFF; djecho entry 0x18B0)"
+
+    # The compiler itself: gcc 3.4.6 + binutils, unpacked into a DJGPP tree on the
+    # emulated drive. The loader points DJGPP= at DJGPP.ENV inside it, which is all
+    # the configuration gcc needs to find its own installation.
+    for f in gcc346b bnu2351b; do
+        [ -f djgpp/$f.zip ] || curl -fL --max-time 600 -o djgpp/$f.zip             http://www.delorie.com/pub/djgpp/current/v2gnu/$f.zip
+    done
+    mkdir -p scratch_root/DJGPP
+    for f in djdev205 gcc346b bnu2351b; do
+        python -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])"             djgpp/$f.zip scratch_root/DJGPP
+    done
+    # gcc looks for cc1 under libexec; having it on PATH too saves a search path issue.
+    cp scratch_root/DJGPP/libexec/gcc/djgpp/3.46/cc1.exe scratch_root/DJGPP/bin/
+    echo "   scratch_root/DJGPP: gcc 3.4.6 + binutils ($(du -sh scratch_root/DJGPP | cut -f1))"
 fi
 
 cat <<'EOF'
@@ -49,4 +63,5 @@ done. Now:
   ./dosemu --root scratch_root scratch_root/LSIC86/BIN/LCC.EXE PROG.C   # then run PROG.exe -> sum=55
   node web/test_shell.mjs && node web/test_bundle.mjs && node web/test_node.mjs
   ./dosemu --root scratch_root scratch_root/stubify.exe                 # a 32-bit DJGPP program
+  ./dosemu --root scratch_root scratch_root/DJGPP/bin/gcc.exe -v        # DJGPP gcc 3.4.6
 EOF

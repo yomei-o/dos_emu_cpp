@@ -8,7 +8,7 @@
 
 namespace dosemu {
 
-bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&);
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&, uint16_t);
 
 void Dos::terminate(int code) {
     if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
@@ -45,7 +45,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
 
     std::string err;
-    if (!load_program(file, cpu_, child_psp, tail, err, name)) {
+    if (!load_program(file, cpu_, child_psp, tail, err, name, mem_.rw(pb_seg, pb_off))) {
         for (int i = 0; i < 8; ++i) cpu_.r[i] = sr[i];
         for (int i = 0; i < 4; ++i) cpu_.sreg[i] = ss[i];
         cpu_.ip = sip; cpu_.flags = sfl; psp_seg = spsp; heap_next_ = sheap;
@@ -447,6 +447,20 @@ bool Dos::int21() {
         // every DJGPP program started with argc == 0.
         case 0x51: case 0x62: cpu_.r[BX] = psp_seg; return true;    // get PSP -> BX
         case 0x50: psp_seg = cpu_.r[BX]; return true;               // set PSP
+        // TRUENAME (DS:SI -> ES:DI). gcc canonicalises every path it touches, so this
+        // is called constantly; without it the driver cannot tell two spellings of the
+        // same file apart. normalize() already does the work for the rest of the layer.
+        case 0x60: {
+            const std::string in = read_asciiz(cpu_.sreg[DS], cpu_.r[SI]);
+            std::string out = "A:" + files_.normalize(in);
+            if (out.size() > 127) out.resize(127);
+            for (size_t i = 0; i < out.size(); ++i)
+                mem_.wb(cpu_.sreg[ES], static_cast<uint16_t>(cpu_.r[DI] + i),
+                        static_cast<uint8_t>(toupper((unsigned char)out[i])));
+            mem_.wb(cpu_.sreg[ES], static_cast<uint16_t>(cpu_.r[DI] + out.size()), 0);
+            cpu_.flags &= ~CF; return true;
+        }
+        case 0x68: case 0x6A: cpu_.flags &= ~CF; return true;       // commit file: we do not buffer
         case 0x4A: {                                                // resize block (ES:block, BX paragraphs)
             // A startup shrink to free memory for children always succeeds; a grow
             // is granted up to the arena, which is all the guest needs here.

@@ -16,7 +16,13 @@ bool is_djgpp_coff(const std::vector<uint8_t>&);
 // the program's own full path — which a shell like FreeCOM reads to find itself).
 static constexpr uint16_t kEnvSeg = 0x00F0;
 static void build_env(Memory& mem, const std::string& dos_name) {
-    const char* vars[] = { "PATH=A:\\LSIC86\\BIN", "COMSPEC=A:\\COMMAND.COM", nullptr };
+    // DJGPP finds everything else from DJGPP.ENV, so that one variable plus its bin
+    // directory on PATH is the whole configuration. LSI C's directory stays first;
+    // the two toolchains share no executable names.
+    const char* vars[] = { "PATH=A:\\LSIC86\\BIN;A:\\DJGPP\\BIN",
+                           "COMSPEC=A:\\COMMAND.COM",
+                           "DJGPP=A:\\DJGPP\\DJGPP.ENV",
+                           nullptr };
     uint16_t off = 0;
     for (int i = 0; vars[i]; ++i) { for (const char* p = vars[i]; *p; ++p) mem.wb(kEnvSeg, off++, *p); mem.wb(kEnvSeg, off++, 0); }
     mem.wb(kEnvSeg, off++, 0);              // end of strings
@@ -25,11 +31,11 @@ static void build_env(Memory& mem, const std::string& dos_name) {
     mem.wb(kEnvSeg, off, 0);
 }
 
-static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline) {
+static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline, uint16_t env_seg) {
     // Minimal PSP. INT 20h at offset 0, the environment segment at 0x2C, and the
     // command tail at 0x80.
     mem.wb(psp_seg, 0x00, 0xCD); mem.wb(psp_seg, 0x01, 0x20);   // INT 20h
-    mem.ww(psp_seg, 0x2C, kEnvSeg);                            // environment segment
+    mem.ww(psp_seg, 0x2C, env_seg);                            // environment segment
     std::string tail = cmdline;
     if (tail.size() > 126) tail.resize(126);
     mem.wb(psp_seg, 0x80, static_cast<uint8_t>(tail.size()));
@@ -40,12 +46,19 @@ static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline)
 // Loads at psp_seg (0x0100 for the top-level program, higher for EXEC children)
 // and fills the CPU's initial state. Returns true on success.
 bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
-                  const std::string& cmdline, std::string& err, const std::string& dos_name) {
+                  const std::string& cmdline, std::string& err, const std::string& dos_name,
+                  uint16_t inherit_env) {
     Memory& mem = cpu.mem();
     uint16_t load_seg = psp_seg + 0x10;   // program starts 256 bytes (one PSP) above
 
-    build_env(mem, dos_name);
-    build_psp(mem, psp_seg, cmdline);
+    // A child launched through EXEC names its own environment block in the parameter
+    // block, and it matters: DJGPP passes command lines longer than the PSP's 126-byte
+    // tail by putting them in an environment variable and sending " !proxy" as the
+    // tail. Rebuild the default environment instead and the child sees an empty command
+    // line -- which is how `gcc` came to invoke `cc1` with no arguments at all.
+    const uint16_t env_seg = inherit_env ? inherit_env : kEnvSeg;
+    if (!inherit_env) build_env(mem, dos_name);
+    build_psp(mem, psp_seg, cmdline, env_seg);
 
     // A DJGPP program is a real-mode DOS stub (go32) wrapping an i386 COFF image, and
     // it no longer needs special handling: the stub is ordinary 16-bit code, it finds

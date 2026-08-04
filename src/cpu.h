@@ -68,9 +68,19 @@ public:
     // as the old segment:offset arithmetic did; protected mode uses the descriptor
     // base into the full extended address space.
     uint32_t lin(int s, uint32_t off) const {
-        if (pe()) return sbase[s] + off;
-        return ((static_cast<uint32_t>(sreg[s]) << 4) + off) & 0xFFFFF;
+        const uint32_t a = pe() ? sbase[s] + off
+                                : ((static_cast<uint32_t>(sreg[s]) << 4) + off) & 0xFFFFF;
+        if (watch_hi && s != CS && a >= watch_lo && a <= watch_hi) watch_hit(a, s, off);
+        return a;
     }
+
+    // DOSEMU_WATCH=lo-hi (hex linear range) reports every data access landing in it.
+    // A protected-mode client that reads the wrong memory is otherwise completely
+    // silent — no DOS call, no DPMI call, just a load through a selector. This lives in
+    // lin() rather than at the ModRM decode because string operations compute their
+    // addresses directly, and a `rep movs` is exactly the thing you end up hunting.
+    static uint32_t watch_lo, watch_hi;
+    void watch_hit(uint32_t a, int s, uint32_t off) const;
     // A decoded GDT/LDT descriptor. `ar` is the access-rights byte (descriptor byte 5)
     // and `hi` the flags nibble (byte 6), which is what LAR reports.
     struct Desc { uint32_t base, limit; uint8_t ar, hi; bool big, present; };
@@ -164,6 +174,10 @@ public:
 
     Memory& mem() { return mem_; }
     uint64_t insns = 0;
+    // How many x87 escapes were swallowed as no-ops. A guest that does real floating
+    // point will silently compute garbage, so this is the first thing to check when a
+    // program aborts for no visible reason.
+    uint64_t fpu_ops = 0;
     uint64_t max_insns = 0;   // 0 = unlimited; otherwise stop with an error (runaway guard)
 
     void set_flag(uint32_t f, bool on) { if (on) flags |= f; else flags &= ~f; }

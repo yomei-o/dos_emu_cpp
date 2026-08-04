@@ -85,6 +85,24 @@ void Dpmi::switch_to_pm() {
     set_desc(es_sel, static_cast<uint32_t>(psp)    << 4, 0x00FF, false, false);   // the PSP is 256 bytes
     set_desc(ss_sel, static_cast<uint32_t>(rm_ss)  << 4, 0xFFFF, false, false);
 
+    // The environment field of the PSP has to become a *selector*, not the real-mode
+    // segment DOS put there. This is not a guess: crt1.c does
+    //
+    //     movedata(_stubinfo->psp_selector, 0x2c, ds, &env_selector, 2);
+    //     movedata(env_selector, 0, ds, dos_environ, _stubinfo->env_size);
+    //
+    // — it reads that word through a selector and immediately uses it as one. In
+    // protected mode the host owns how the PSP reads, so converting the field is the
+    // host's job. Leave it as a segment and the client copies its environment out of
+    // whatever descriptor that number happens to name: no fault, no DOS error, just an
+    // empty environment and an empty argv[0].
+    const uint16_t env_seg = mem_.rw(psp, 0x2C);
+    if (env_seg) {
+        const uint16_t env_sel = alloc_sel();
+        set_desc(env_sel, static_cast<uint32_t>(env_seg) << 4, 0xFFFF, false, false);
+        mem_.ww(psp, 0x2C, env_sel);
+    }
+
     cpu_.cr[0] |= 1;                      // PE — from here set_seg() reads descriptors
     cpu_.set_seg(DS, ds_sel);
     cpu_.set_seg(ES, es_sel);
@@ -93,9 +111,24 @@ void Dpmi::switch_to_pm() {
     cpu_.ip = ret_ip;
     cpu_.set_flag(CF, false);
 
-    if (trace)
+    if (trace) {
         printf("[dpmi] switch to %s protected mode: cs=%04X(%04X) ds=%04X es=%04X(psp %04X) ss=%04X ip=%04X\n",
                is32 ? "32-bit" : "16-bit", cs_sel, ret_cs, ds_sel, es_sel, psp, ss_sel, ret_ip);
+        // The two things a client reads out of the PSP, at the moment it gets it: the
+        // command tail and the environment segment. Everything a program knows about
+        // how it was invoked comes through these, so when a client starts up blind this
+        // says immediately whether it was handed nothing or misread something.
+        const uint16_t env = mem_.rw(psp, 0x2C);
+        printf("[dpmi]   psp:80 tail(%u) \"", mem_.rb(psp, 0x80));
+        for (uint8_t i = 0; i < mem_.rb(psp, 0x80) && i < 40; ++i) printf("%c", mem_.rb(psp, 0x81 + i));
+        printf("\"  psp:2C env=%04X \"", env);
+        for (uint16_t i = 0; i < 120; ++i) {
+            const uint8_t c = mem_.rb(env, i);
+            if (!c && !mem_.rb(env, i + 1)) break;
+            printf("%c", c ? c : '|');
+        }
+        printf("\"\n");
+    }
 }
 
 // INT 31h 0300h — "simulate real-mode interrupt". This is the hinge of the whole
@@ -141,6 +174,19 @@ void Dpmi::simulate_real_int() {
         // Show what a write actually writes. Whether a client's output is empty is the
         // difference between "the DOS call failed" and "the client had nothing to say",
         // and those two have completely different causes.
+        // For the calls that take a path at DS:DX, show the path. A client that cannot
+        // find a file and one that never looked for it produce the same silence.
+        const uint8_t ah = static_cast<uint8_t>(cpu_.r[AX] >> 8);
+        if (vec == 0x21 && (ah == 0x3D || ah == 0x3C || ah == 0x41 || ah == 0x43 ||
+                            ah == 0x4E || ah == 0x60 || ah == 0x39 || ah == 0x3B)) {
+            printf("  \"");
+            for (int i = 0; i < 80; ++i) {
+                const uint8_t c = mem_.rb(cpu_.sreg[DS], static_cast<uint16_t>(cpu_.r[DX] + i));
+                if (!c) break;
+                printf("%c", (c >= 32 && c < 127) ? c : '.');
+            }
+            printf("\"");
+        }
         if (vec == 0x21 && (cpu_.r[AX] >> 8) == 0x40) {
             printf("  \"");
             for (uint16_t i = 0; i < cpu_.r[CX] && i < 60; ++i) {

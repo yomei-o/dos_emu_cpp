@@ -194,6 +194,50 @@ Ruled out along the way, so nobody re-checks them: `AH=62h` (the stub never call
 implemented anyway, and it *was* genuinely missing), and `_dos_ds` (the client builds it
 correctly as selector `0x4C`, base 0, limit `0x110FFF`).
 
+**Where the DJGPP toolchain stands.** `sh get_fixtures.sh djgpp` also installs a full
+DJGPP tree (djdev205 + gcc 3.4.6 + binutils 2.35.1) under `scratch_root/DJGPP`, and the
+loader now puts `DJGPP=A:\DJGPP\DJGPP.ENV` and its `bin` directory in the environment.
+
+Working:
+
+    ./dosemu --root scratch_root scratch_root/DJGPP/bin/gcc.exe -v
+    -> gcc version 3.4.6            (reads DJGPP.ENV, finds its installation)
+    ./dosemu --root scratch_root scratch_root/DJECHO.EXE hello world   -> hello world
+    ./dosemu --root scratch_root scratch_root/dtou.exe -> Usage: dtou.exe [-b] ...
+
+**Not working: `cc1` aborts.** `gcc -O2 hello.c -o hello.exe` spawns cc1 — the nested
+EXEC out of protected mode works — and cc1 runs ~94 million instructions before calling
+`abort()`. It does the same standalone (`cc1.exe hello.c -quiet -o hello.s`), so the
+driver is not involved. `cpp.exe hello.c` is the smaller version of the same failure: it
+stats the source, never opens it, and exits 0 with no output.
+
+Ruled out, with evidence, so nobody repeats them:
+- **Not the FPU.** `DOSEMU_STATS=1` counts x87 escapes swallowed as no-ops: 53 across
+  93.7M instructions, i.e. startup probing only. cc1 does its real arithmetic in
+  software. (The `Coprocessor not present` banner every DJGPP program prints is just
+  `0303h` + `0E01h` being unimplemented; it is cosmetic.)
+- **Not memory exhaustion.** cc1 asks 0501h for three blocks totalling ~19 MiB, which is
+  why `Memory::kSize` is now 64 MiB. Undersized, 0501h succeeded and the writes wrapped
+  at `kMask`; that is fixed and the abort is unchanged.
+- **Not missing DOS calls.** Everything cc1 reaches for is implemented; `AH=5Dh` (get
+  SDA) is the only refusal left and DJGPP's own `lstat.c` treats that failure as
+  non-fatal by design.
+- **Not argv or the environment** — both verified working on smaller DJGPP programs.
+
+So it is very likely a **CPU bug in 32-bit protected mode** that only code as large as
+cc1 reaches. The way to find it is the differential trace that found the `ip_mask` bug,
+but there is no known-good build to diff against, so the practical route is a smaller
+reproducer: `cpp.exe` is already 1/5 the work and fails the same way, and its last useful
+act is a `stat()` on the source. Start by tracing what `cpp` does between that stat and
+its silent exit.
+
+**A dead end, recorded so it is not retried:** giving the environment block an MCB. The
+theory was that DJGPP's stub sizes the environment from the MCB in the paragraph below
+it. It does not need to, it changed nothing — and a lone `'M'` (not-last) MCB tells
+anything that walks the chain to step into the PSP, which **broke FreeCOM**: every
+command came back `Bad command or filename`. There is no MCB chain in this emulator and
+adding one link is worse than having none.
+
 **Also unimplemented, and harmless so far** — every DJGPP program opens with
 `Warning: Coprocessor not present and DPMI setup failed!`. That is exactly two missing
 functions: `0303h` (allocate real-mode callback), used to hook the FPU emulator, and

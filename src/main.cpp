@@ -10,7 +10,7 @@
 #include "memory.h"
 
 namespace dosemu {
-bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&);
+bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&, uint16_t);
 }
 
 static std::vector<uint8_t> read_file(const char* path) {
@@ -46,13 +46,29 @@ int main(int argc, char** argv) {
     };
     dos.input = []() { int c = std::getchar(); return c == EOF ? -1 : c; };
 
-    // The program's DOS path: A:\ + its base name (a shell reads this to find itself).
-    std::string base = argv[a]; { auto s = base.find_last_of("/\\"); if (s != std::string::npos) base = base.substr(s + 1); }
-    for (char& c : base) c = static_cast<char>(std::toupper((unsigned char)c));
-    std::string dos_name = "A:\\" + base;
+    // The program's DOS path, as the guest will see it: A:\ plus its location under
+    // --root. It has to be the real path, not just the base name — a program that lives
+    // in a subdirectory finds its own installation by opening argv[0], and DJGPP's gcc
+    // does exactly that. With the base name alone it reports `A:\GCC.EXE: can't open`.
+    std::string dos_name;
+    {
+        auto slashes = [](std::string s) { for (char& c : s) if (c == '/') c = '\\'; return s; };
+        std::string p = slashes(argv[a]), r = slashes(root);
+        while (!r.empty() && r.back() == '\\') r.pop_back();
+        std::string rel;
+        if (!r.empty() && r != "." && p.size() > r.size() + 1 &&
+            p.compare(0, r.size(), r) == 0 && p[r.size()] == '\\') {
+            rel = p.substr(r.size() + 1);                       // inside the guest drive
+        } else {
+            auto s = p.find_last_of('\\');                      // elsewhere: base name only
+            rel = (s == std::string::npos) ? p : p.substr(s + 1);
+        }
+        for (char& c : rel) c = static_cast<char>(std::toupper((unsigned char)c));
+        dos_name = "A:\\" + rel;
+    }
 
     std::string err;
-    if (!load_program(file, cpu, 0x0100, cmdline, err, dos_name)) {
+    if (!load_program(file, cpu, 0x0100, cmdline, err, dos_name, 0)) {
         std::fprintf(stderr, "dosemu: %s\n", err.c_str());
         return 1;
     }
@@ -67,5 +83,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::fflush(stdout);
+    if (getenv("DOSEMU_STATS"))
+        std::fprintf(stderr, "[stats] %llu instructions, %llu x87 escapes no-opped\n",
+                     (unsigned long long)cpu.insns, (unsigned long long)cpu.fpu_ops);
     return cpu.exit_code;
 }

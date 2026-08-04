@@ -13,7 +13,12 @@ class Memory {
 public:
     Memory() : ram_(kSize, 0) {}
 
-    static constexpr uint32_t kSize = 0x1000000;  // 16 MiB (1 MiB real + extended)
+    // 64 MiB. Sized by the largest real client: DJGPP's cc1 asks the DPMI host for
+    // three blocks totalling ~19 MiB to compile a trivial file, and gcc's driver has
+    // its own on top. Undersize it and 0501h either fails or, worse, succeeds and the
+    // writes wrap at kMask into memory that is already in use.
+    static constexpr uint32_t kSize = 0x4000000;
+
     static constexpr uint32_t kMask = kSize - 1;
 
     // Real-mode address wrap stays at 1 MiB; extended access uses r*/w* directly.

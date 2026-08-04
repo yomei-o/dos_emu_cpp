@@ -11,9 +11,22 @@
 // unhandled opcode stops with its byte and address, the way a new guest is brought
 // up. Not modelled yet: protected mode itself, and the x87 FPU (escapes are no-ops).
 #include "cpu.h"
+#include <cstdlib>
+#include <cstring>
 #include <cstdio>
 
 namespace dosemu {
+
+uint32_t Cpu::watch_lo = [] { const char* s = getenv("DOSEMU_WATCH");
+    return s ? (uint32_t)strtoul(s, nullptr, 16) : 0u; }();
+uint32_t Cpu::watch_hi = [] { const char* s = getenv("DOSEMU_WATCH");
+    const char* d = s ? strchr(s, '-') : nullptr;
+    return d ? (uint32_t)strtoul(d + 1, nullptr, 16) : 0u; }();
+
+void Cpu::watch_hit(uint32_t a, int s, uint32_t off) const {
+    printf("[watch] %08X  seg%d=%04X base=%08X off=%08X  at %04X:%08X\n",
+           a, s, sreg[s], sbase[s], off, sreg[CS], ip);
+}
 
 void Cpu::fail(const std::string& msg, uint8_t op) {
     char buf[160];
@@ -625,6 +638,7 @@ void Cpu::step() {
         // answer FNSTSW AX (DF /4, mod=3) so a CRT believes the FPU came up clean.
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: {
             Modrm m; decode_modrm(m);
+            ++fpu_ops;
             if (op == 0xDF && m.mod == 3 && m.reg == 4) r[AX] = 0;   // FNSTSW AX
             break;
         }
