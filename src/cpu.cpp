@@ -652,6 +652,18 @@ void Cpu::step() {
             if (rep) {
                 auto getCX = [&]() -> uint32_t { return a32 ? gd(CX) : r[CX]; };
                 auto decCX = [&]() { if (a32) sd(CX, gd(CX) - 1); else --r[CX]; };
+                // A whole REP runs inside one step(), so it counts as one instruction and a
+                // runaway count is invisible: the emulator looks wedged while the sample
+                // trace insists it is executing normally. Worth saying out loud — but only
+                // for the copying forms, where the count *is* a length. `repne scasb` with
+                // ECX = -1 is how everyone writes strlen: it stops on the flag, and the
+                // count is there to say "no limit".
+                if (!cmp && getCX() > (1u << 24)) {
+                    static int n = 0;
+                    if (++n <= 4)
+                        printf("[rep] %02X moving %08X bytes at %04X:%08X — that is not a"
+                               " real length\n", op, getCX(), sreg[CS], ip - 1);
+                }
                 while (getCX()) { decCX(); once(); if (cmp) { bool z = get_flag(ZF); if (rep == 0xF3 && !z) break; if (rep == 0xF2 && z) break; } }
             } else once();
             break;

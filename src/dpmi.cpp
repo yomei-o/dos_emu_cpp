@@ -19,7 +19,8 @@ Dpmi::Dpmi(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
     mem_.wb(kEntrySeg, kOffSavePm, 0xCB);
     cpu_.hook_lo = Memory::phys(kEntrySeg, 0);
     for (int i = 0; i < kCallbacks; ++i) mem_.wb(kEntrySeg, kOffCbBase + i, 0xCB);
-    cpu_.hook_hi = Memory::phys(kEntrySeg, kOffCbBase + kCallbacks);
+    for (int i = 0; i < 256; ++i) mem_.wb(kEntrySeg, kOffPmInt + i, 0xCF);   // IRET, if reached raw
+    cpu_.hook_hi = Memory::phys(kEntrySeg, kEntryBytes);
     cpu_.on_hook = [this](uint32_t off) {
         if (off == 0)             { switch_to_pm();    return true; }
         if (off == kOffRawToPm)   { raw_switch(true);  return true; }
@@ -27,6 +28,9 @@ Dpmi::Dpmi(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
         if (off == kOffCbRet)     { cb_return();       return true; }
         if (off >= kOffCbBase && off < kOffCbBase + kCallbacks) {
             call_back(static_cast<int>(off - kOffCbBase)); return true;
+        }
+        if (off >= kOffPmInt && off < kOffPmInt + 256) {
+            pm_int_default(static_cast<uint8_t>(off - kOffPmInt)); return true;
         }
         return false;
     };
@@ -89,6 +93,7 @@ void Dpmi::switch_to_pm() {
     cpu_.r[SP] += 4;
 
     const bool is32 = (cpu_.r[AX] & 1) != 0;
+    client32_ = is32;
     const uint16_t rm_ds = cpu_.sreg[DS], rm_ss = cpu_.sreg[SS];
     // ES must come out as a selector for the *PSP*, not an alias of whatever ES the
     // client happened to be holding when it called. That is the spec, and it is not a
@@ -174,6 +179,51 @@ uint16_t Dpmi::entry_sel() {
         set_desc(entry_sel_, Memory::phys(kEntrySeg, 0), 0xFFFF, true, true);
     }
     return entry_sel_;
+}
+
+// Deliver an interrupt to the handler the client installed with 0205h, as an interrupt
+// handler is delivered: a frame on the stack it is already using, and it returns with
+// IRET. Returns false when nothing is hooked, and then the DOS layer services the call
+// exactly as before.
+//
+// This is the same shape as the guest-owns-the-IDT case in Cpu::interrupt(): a client that
+// hooks a vector means it. DOS/4GW hooks protected-mode INT 21h so that *its* handler can
+// translate the call — turn a flat 32-bit pointer into something DOS can reach — before
+// passing it down through 0300h. Servicing the call ourselves instead skipped the
+// translation, so the DOS layer got a buffer address of "selector with base 0, offset 0"
+// and dutifully read 21 KiB of a file over the interrupt vector table.
+//
+// The frame is 16- or 32-bit according to what the *client* declared itself to be at the
+// mode-switch entry, not according to the handler's code segment. DOS/4GW registers its
+// handlers in the 16-bit alias selector it was handed and unwinds them with IRETD.
+bool Dpmi::pm_int(uint8_t n) {
+    const Handler& h = pmint_[n];
+    if (!h.sel || in_default_) return false;
+    const bool wide = client32_;
+    if (wide) { cpu_.push32(cpu_.flags); cpu_.push32(cpu_.sreg[CS]); cpu_.push32(cpu_.ip); }
+    else      { cpu_.push16(cpu_.flags); cpu_.push16(cpu_.sreg[CS]);
+                cpu_.push16(static_cast<uint16_t>(cpu_.ip)); }
+    if (trace) printf("[dpmi] pm int %02X -> client %04X:%08X (%s frame)\n",
+                      n, h.sel, h.off, wide ? "32-bit" : "16-bit");
+    cpu_.set_flag(IF, false);
+    cpu_.set_seg(CS, h.sel);
+    cpu_.jump(h.off);
+    return true;
+}
+
+// The address 0204h reports as the *host's* handler for a vector, so a client can chain
+// to it. Reaching it services the interrupt the ordinary way and then unwinds the frame
+// itself, because the client may have arrived here by jumping with a frame we built.
+void Dpmi::pm_int_default(uint8_t n) {
+    in_default_ = true;
+    if (real_int) real_int(n);
+    in_default_ = false;
+    const bool wide = client32_;
+    const uint32_t ip = wide ? cpu_.pop32() : cpu_.pop16();
+    const uint16_t cs = static_cast<uint16_t>(wide ? cpu_.pop32() : cpu_.pop16());
+    cpu_.flags = static_cast<uint16_t>((wide ? cpu_.pop32() : cpu_.pop16()) | 0x0002);
+    cpu_.set_seg(CS, cs);
+    cpu_.jump(ip);
 }
 
 // A selector over the whole first megabyte. A callback hands the client a pointer to the
@@ -497,6 +547,16 @@ bool Dpmi::int31() {
             ok(); break;
         case 0x0202: case 0x0204: {                      // get exception / PM interrupt handler
             const int i = (fn == 0x0202) ? (cpu_.r[BX] & 0x1F) : (cpu_.r[BX] & 0xFF);
+            // A client reads this to find the handler it should chain to. Reporting 0:0
+            // for a vector nobody has hooked is not a neutral answer: DOS/4GW reads all
+            // 256 of them at startup and saves them, and a chain through a null selector
+            // is a jump to nowhere. Report our own default handler instead — it services
+            // the interrupt and unwinds the frame, which is what chaining is for.
+            if (fn == 0x0204 && !pmint_[i].sel) {
+                cpu_.r[CX] = entry_sel();
+                cpu_.sd(DX, static_cast<uint32_t>(kOffPmInt + i));
+                ok(); break;
+            }
             const Handler& h = (fn == 0x0202) ? exc_[i] : pmint_[i];
             cpu_.r[CX] = h.sel; cpu_.sd(DX, h.off); ok(); break;
         }

@@ -10,9 +10,9 @@
 namespace dosemu {
 
 // Where the DOS list-of-lists is handed out: just above the DPMI host's entry points,
-// which own 0x00E0 through 0x00E7. Both are inside the memory arena and marked as DOS's
+// which own 0x00E0 through 0x00F7. Both are inside the memory arena and marked as DOS's
 // own, so nothing allocates over them.
-static constexpr uint16_t kLolSeg = 0x00E8;
+static constexpr uint16_t kLolSeg = 0x00F8;
 
 bool Dos::trace = getenv("DOSEMU_DOS_TRACE") != nullptr;
 
@@ -284,6 +284,10 @@ bool Dos::mem_resize(uint16_t seg, uint16_t paras) {
 // because a walker that finds a signature follows it to the end. Every block gets one or
 // no block does.
 void Dos::mem_publish() {
+    static unsigned long long calls = 0;
+    if (++calls % 100000 == 0)
+        std::fprintf(stderr, "[dbg] mem_publish %llu calls, %u blocks\n", calls,
+                     static_cast<unsigned>(blocks_.size()));
     for (size_t i = 0; i < blocks_.size(); ++i) {
         const Block& b = blocks_[i];
         mem_.wb(b.seg, 0, i + 1 == blocks_.size() ? 'Z' : 'M');
@@ -533,6 +537,11 @@ struct SegAlias {
 };
 
 bool Dos::handle(uint8_t n) {
+    // A protected-mode client that hooked this vector gets it first. Its handler may
+    // service the call itself, or translate the arguments and pass it down through the
+    // host's default handler; either way, going straight to the DOS layer would skip
+    // work the client is relying on.
+    if (cpu_.pe() && dpmi_.pm_int(n)) return true;
     SegAlias ads(cpu_, DS), aes(cpu_, ES);
     switch (n) {
         // A CPU exception, not a service call. Nothing here can handle one, but
@@ -547,6 +556,11 @@ bool Dos::handle(uint8_t n) {
             if (!trace) return int21();
             const uint16_t ax = cpu_.r[AX], bx = cpu_.r[BX], cx = cpu_.r[CX], dx = cpu_.r[DX];
             const uint16_t es = cpu_.sreg[ES];   // AH=48/49/4Ah and EXEC all carry a segment here
+            // For a protected-mode caller the 16-bit pair says nothing: what the layer
+            // will actually read is the descriptor base plus the *32-bit* offset, and
+            // whether those two agree is the whole question.
+            const bool pm = cpu_.pe();
+            const uint32_t edx = cpu_.gd(DX), dsb = cpu_.sbase[DS];
             // The calls that carry a string say far more than their registers do.
             const uint8_t ah_ = ax >> 8;
             if (ah_ == 0x3D || ah_ == 0x3C || ah_ == 0x41 || ah_ == 0x43 || ah_ == 0x4E ||
@@ -570,15 +584,32 @@ bool Dos::handle(uint8_t n) {
                 (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, cpu_.sreg[DS], dx, es,
                 (cpu_.flags & CF) ? "CF" : "ok", cpu_.r[AX], cpu_.r[BX],
                 cpu_.sreg[CS], cpu_.ip);
+            if (pm) std::fprintf(stderr, "[int21]   pm: ds base=%08X edx=%08X -> %08X\n",
+                                 dsb, edx, dsb + edx);
             return r;
         }
         case 0x16: {                                     // BIOS keyboard services
             uint8_t ah = cpu_.r[AX] >> 8;
+            if (trace) std::fprintf(stderr, "[int16] ah=%02X at %04X:%08X\n",
+                                    ah, cpu_.sreg[CS], cpu_.ip);
             if (ah == 0x00 || ah == 0x10) {              // read a key -> AL=ascii, AH=scancode
                 int c = getch(); if (c < 0) c = 0x1A;
                 cpu_.r[AX] = (static_cast<uint16_t>(c ? 0x1C : 0) << 8) | (c & 0xFF);
-            } else if (ah == 0x01 || ah == 0x11) {       // key available? -> ZF=0 and peek in AX
-                cpu_.flags &= ~ZF; cpu_.r[AX] = 0x1C0D;  // pretend Enter is waiting
+            } else if (ah == 0x01 || ah == 0x11) {       // key available? ZF=1 means no
+                // This used to answer "yes, Enter is waiting" unconditionally, which is
+                // the same shape of lie as every other bug on this project: a caller that
+                // believes it then reads the key, and the read blocks on a stdin nobody is
+                // typing into. DOS/4GW polls the keyboard during startup and hung there
+                // with no output at all — the hardest kind of hang to find, because a
+                // process asleep in a read looks identical to a process wedged in a loop.
+                //
+                // Nobody can answer this truthfully without a way to ask whether input is
+                // waiting, so that is a hook the host supplies; unset, the answer is no.
+                // The DOS input calls (AH=01/07/08/0Ah) are unaffected — they block, which
+                // is what they are for.
+                const bool ready = input_ready && input_ready();
+                if (ready) { cpu_.flags &= ~ZF; cpu_.r[AX] = 0x1C0D; }
+                else       { cpu_.flags |= ZF; }
             } else if (ah == 0x02) {                     // shift status
                 cpu_.sb(AX, 0);
             }

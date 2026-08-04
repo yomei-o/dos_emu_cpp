@@ -66,6 +66,7 @@ private:
     //   +0x40  save/restore state, protected mode     (0305h) -- ditto
     //   +0x50  where a callback's IRETD lands, to come back to real mode
     //   +0x60  32 real-mode callback addresses, one byte apart (0303h)
+    //   +0x80  256 default protected-mode interrupt handlers, one byte each (0204h)
     static constexpr uint16_t kEntrySeg   = 0x00E0;
     static constexpr uint16_t kOffRawToPm = 0x10;
     static constexpr uint16_t kOffRawToRm = 0x20;
@@ -74,6 +75,8 @@ private:
     static constexpr uint16_t kOffCbRet   = 0x50;
     static constexpr uint16_t kOffCbBase  = 0x60;
     static constexpr int      kCallbacks  = 32;
+    static constexpr uint16_t kOffPmInt   = 0x80;
+    static constexpr uint16_t kEntryBytes = kOffPmInt + 256;
 
     // Our LDT, in extended memory just above the 1 MiB real-mode window.
     static constexpr uint32_t kLdtBase  = 0x00110000;
@@ -117,6 +120,26 @@ private:
     void cb_stack(uint16_t& sel, uint32_t& sp);   // a stack for a callback to run on
     void call_back(int slot);
     void cb_return();
+
+    // Protected-mode interrupt dispatch. A client that hooks a vector with 0205h means
+    // it: DOS/4GW hooks INT 21h so that *its* handler can translate a call before passing
+    // it down, and until this existed the DOS layer got the call straight and read the
+    // client's arguments through a selector whose base was 0.
+    void pm_int_default(uint8_t n);
+public:
+    bool pm_int(uint8_t n);
+private:
+    // Whether the client declared itself 32-bit at the mode-switch entry (AX bit 0). That
+    // — not the handler's own code segment — is what decides the width of the interrupt
+    // frame a protected-mode handler is entered with. DOS/4GW registers handlers in a
+    // 16-bit alias selector and unwinds them with IRETD, so guessing from the selector
+    // pushed three words and had six popped.
+    bool client32_ = false;
+    // Set while the host's own default handler is servicing an interrupt, so that
+    // servicing it does not dispatch straight back to the client's handler. A client that
+    // chains to the default handler is asking for the *host's* behaviour, and handing the
+    // call back to the handler that just chained is a loop with no exit.
+    bool in_default_ = false;
 
     void switch_to_pm();
     void raw_switch(bool to_pm);
