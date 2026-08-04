@@ -36,6 +36,11 @@ public:
     std::function<int()> input;
 
     uint16_t psp_seg = 0;   // set by the loader
+    // The current program's environment *segment*. Kept here rather than read back
+    // from PSP:2Ch, because the DPMI mode switch rewrites that field into a selector
+    // for the protected-mode client — after which it is no longer a segment and the
+    // DOS layer cannot use it to build a child's environment.
+    uint16_t env_seg = 0;
 
     // Fill in the PSP fields the loader cannot know: who the parent is, and where this
     // program's memory block ends. Call after load_program(). A program that only ever

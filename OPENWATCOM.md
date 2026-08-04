@@ -40,32 +40,34 @@ progress.
 
 No output, no `.OBJ`.
 
-**The open question is how W32RUN is supposed to learn which program to load.** The
-stub `EXEC`s it with a command tail of just `" hello.c"` and `env=0` (inherit), so the
-target is not on the command line. The instruction trace at the point it gives up
-(`DOSEMU_TRACE=11660-11702`) is byte compares followed by `xor eax,eax` and a clean
-return — it is looking something up and not finding it. Candidates, in the order worth
-trying:
+**How the target is communicated — found.** The stub writes an environment variable:
 
-- ~~the **parent's** environment, reached through `PSP:16h` → parent PSP → `PSP:2Ch`~~
-  — **ruled out by measurement.** `DOSEMU_WATCH=1000-1040` (the parent PSP) and
-  `DOSEMU_WATCH=30010-30020` (the child's own `PSP:16h`) show W32RUN never reads
-  either. The only read of the parent PSP in the whole run is the stub fetching its own
-  environment segment before the `EXEC`. The chain works now — the fix was worth making
-  regardless, see below — but it is not the mechanism.
-- a Watcom-specific environment variable, or something the stub *adds* to the
-  environment before EXEC. Worth dumping the child's environment as W32RUN receives it.
-- the `EXEC` parameter block's two FCB pointers, which we ignore entirely, and the
-  child PSP's FCB fields at `5Ch`/`6Ch`, which we never fill in.
-- that the flow is not what it looks like: perhaps W32RUN is only meant to *install* an
-  extender and hand back, and the stub is supposed to do the loading. Against that: the
-  stub does `4Bh`, then `4Dh` (reads the child's exit code, gets 0), then `4Ch` — it
-  simply runs W32RUN and quits. Worth confirming by disassembling the stub at
-  `0110:06A9`, which is where the `EXEC` is issued.
+    PATH=... COMSPEC=... DJGPP=... WATCOM=A:\ INCLUDE=A:\H $=A:\BINW\WCC386.EXE
 
-`DOSEMU_DOS_TRACE=1` prints every call with its instruction count, and paths and EXEC
-tails in full; `DOSEMU_TRACE=lo-hi` then shows the instructions between any two of
-them. That pair is how each of the fixes below was found.
+a variable literally named `$`, holding the path of the program to load. That is how
+W32RUN learns what it is loading; nothing on the command line or in the PSP carries it.
+It was found by dumping the environment block as the child receives it, after the
+disassembly at `0110:0686` showed the `EXEC` parameter block carries only `env=0`, the
+stub's own PSP command tail and its two FCBs.
+
+**And the stub writes it over the trailing program name.** Our environment block is
+sized exactly, with the count word and the program path immediately after the strings,
+so appending `$=…` lands on top of them — the block that reaches W32RUN has the `$`
+variable but no trailing name at all. Change the child's environment to a faithful copy
+(as it is now) and W32RUN opens `""`; leave it rebuilt with the child's own name and it
+opens `W32RUN.EXE`. Either way it is reading *the trailing name*, not `$`.
+
+So the two facts are in tension and one of the assumptions is wrong. The next step is
+to settle which:
+
+- most likely, a real DOS environment block has **slack** — DOS allocates it in whole
+  paragraphs with room to grow, so appending a variable does not land on the program
+  name. Ours is packed to the byte. Giving the block real slack and re-testing is cheap
+  and would explain everything.
+- otherwise, W32RUN reads `$` and something about how we present it is wrong.
+
+Everything needed to tell them apart is already in place: `DOSEMU_DOS_TRACE=1` prints
+the child's environment strings as they are handed over, and the path of every open.
 
 ## Fixed on the way here
 
