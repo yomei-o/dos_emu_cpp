@@ -139,6 +139,10 @@ struct Decode {
 void Cpu::run() { while (!halted) step(); }
 
 void Cpu::interrupt(uint8_t n) {
+    if (n == 0x21 && getenv("DOSEMU_INTWATCH"))
+        printf("[int]%llu INT 21 ax=%04X ds=%04X(%08X) pe=%d at %04X:%08X\n",
+               (unsigned long long)insns, r[AX], sreg[DS], sbase[DS], pe() ? 1 : 0,
+               sreg[CS], ip);
     // A protected-mode guest that loaded its own IDT means it: the handler is not
     // decoration. Watcom's X-32 extender runs under its own GDT/IDT and reflects DOS
     // calls itself, and the code around them assumes its own handler's register
@@ -640,7 +644,13 @@ void Cpu::step() {
         case 0xA8: alu8(4, gb(AX), fetch8()); break;
         case 0xA9: aluv(4, grw(AX), fetchImmV()); break;
 
-        // String ops (address size selects SI/DI/CX vs ESI/EDI/ECX)
+        // String ops (address size selects SI/DI/CX vs ESI/EDI/ECX). INS/OUTS (6C-6F) are
+        // here too: they are string operations whose other end is a port rather than
+        // memory, and they get REP for free by living in this block. Nothing here has a
+        // device behind it — io_in returns zero — so INS fills memory with zeros and OUTS
+        // discards, which is what "no hardware there" means. DOS/4GW uses INSB, and an
+        // unimplemented opcode was the next thing after its banner finally appeared.
+        case 0x6C: case 0x6D: case 0x6E: case 0x6F:
         case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xA6: case 0xA7: case 0xAE: case 0xAF: {
             bool word = op & 1; int w = word ? (o32 ? 4 : 2) : 1; int delta = get_flag(DF) ? -w : w;
             int dsi = d.have_ovr ? d.seg_ovr_idx : DS;
@@ -653,6 +663,19 @@ void Cpu::step() {
             auto wrdst = [&](uint32_t v) { uint32_t a = lin(ES, getDI()); if (!word) mem_.w8(a, static_cast<uint8_t>(v)); else if (o32) mem_.w32(a, v); else mem_.w16(a, static_cast<uint16_t>(v)); };
             auto once = [&]() {
                 switch (op & 0xFE) {
+                    case 0x6C: {                                                                                     // INS
+                        uint32_t v = io_in(r[DX]);
+                        if (word) v |= static_cast<uint32_t>(io_in(r[DX] + 1)) << 8;
+                        if (word && o32) v |= (static_cast<uint32_t>(io_in(r[DX] + 2)) << 16)
+                                            | (static_cast<uint32_t>(io_in(r[DX] + 3)) << 24);
+                        wrdst(v); addDI(delta); break;
+                    }
+                    case 0x6E: {                                                                                     // OUTS
+                        const uint32_t v = rdsrc();
+                        for (int b = 0; b < w; ++b) io_out(static_cast<uint16_t>(r[DX] + b),
+                                                           static_cast<uint8_t>(v >> (b * 8)));
+                        addSI(delta); break;
+                    }
                     case 0xA4: wrdst(rdsrc()); addSI(delta); addDI(delta); break;                                    // MOVS
                     case 0xAA: wrdst(grw(AX)); addDI(delta); break;                                                  // STOS
                     case 0xAC: srw(AX, rdsrc()); addSI(delta); break;                                                // LODS

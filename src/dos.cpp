@@ -521,8 +521,16 @@ void Dos::write_dta_entry() {
 // client wanting DOS to read its buffer has to put the buffer where DOS can reach it.
 struct SegAlias {
     Cpu& cpu; int idx; uint16_t sel; bool swapped = false;
-    SegAlias(Cpu& c, int i) : cpu(c), idx(i), sel(c.sreg[i]) {
-        if (!cpu.pe()) return;
+    // `apply` is false for INT 31h, and that is not tidiness. The DPMI host reads its own
+    // arguments through Cpu::lin() with the real selector, so it never needed the alias —
+    // and, decisively, a host service may *transfer control*: 0301h/0302h set the machine
+    // up for a real-mode procedure and return, expecting the guest to run next. Unwinding
+    // an alias on the way out then puts a selector back into a segment register whose base
+    // has just been set for real mode, leaving DS = 003F with base 0x1100. That is a
+    // segment register disagreeing with its own cache, and it is what made the Watcom
+    // linker print its error message out of the wrong address for a day.
+    SegAlias(Cpu& c, int i, bool apply) : cpu(c), idx(i), sel(c.sreg[i]) {
+        if (!apply || !cpu.pe()) return;
         const uint32_t base = cpu.sbase[idx];
         if (base >= 0x100000 || (base & 0xF)) return;
         cpu.sreg[idx] = static_cast<uint16_t>(base >> 4);
@@ -542,7 +550,7 @@ bool Dos::handle(uint8_t n) {
     // host's default handler; either way, going straight to the DOS layer would skip
     // work the client is relying on.
     if (cpu_.pe() && dpmi_.pm_int(n)) return true;
-    SegAlias ads(cpu_, DS), aes(cpu_, ES);
+    SegAlias ads(cpu_, DS, n != 0x31), aes(cpu_, ES, n != 0x31);
     switch (n) {
         // A CPU exception, not a service call. Nothing here can handle one, but
         // silently returning would leave the guest running on the garbage that caused
