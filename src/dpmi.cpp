@@ -283,6 +283,7 @@ void Dpmi::store_frame(uint32_t f) {
 // so it wants flags on the stack under the return address; 0301h's uses RETF.
 void Dpmi::rm_call(bool iret_frame) {
     const uint32_t f = cpu_.lin(ES, cpu_.gd(DI));
+    const uint16_t client_cx = cpu_.r[CX];               // before the frame overwrites it
     if (rm_depth_ >= 4) {                                // four deep is already absurd
         cpu_.set_flag(CF, true); cpu_.r[AX] = 0x8001; return;
     }
@@ -299,9 +300,13 @@ void Dpmi::rm_call(bool iret_frame) {
     if (!ss && !sp) { ss = scratch_stack_seg(); sp = 0x0F00; }
     cpu_.set_seg(SS, ss); cpu_.r[SP] = sp;
 
-    // The client may have asked us to copy words from its stack onto the real-mode one;
-    // CX says how many. Its stack is where the frame said, in protected mode.
-    const uint16_t words = cpu_.r[CX] & 0xFF;
+    // The client may have asked us to copy words from its stack onto the real-mode one,
+    // and CX said how many — CX *at the INT 31h*, which is not the CX the frame carries.
+    // Reading it after load_frame() meant a 7-byte DOS write asked for seven words of
+    // stack copy, and those words landed on top of the very string it was writing:
+    // `strlen` measured "DOS/16M" as 7 characters one instruction before the call, and
+    // seven records of interrupt-vector table came out of it.
+    const uint16_t words = client_cx & 0xFF;
     const uint32_t pm_sp = rc.saved.ss_d
         ? (rc.saved.r[SP] | (static_cast<uint32_t>(rc.saved.rhi[SP]) << 16))
         : rc.saved.r[SP];
