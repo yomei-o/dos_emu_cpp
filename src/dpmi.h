@@ -65,6 +65,7 @@ private:
     //   +0x30  save/restore state, real mode          (0305h) -- a bare far RET
     //   +0x40  save/restore state, protected mode     (0305h) -- ditto
     //   +0x50  where a callback's IRETD lands, to come back to real mode
+    //   +0x51  where a real-mode procedure called by 0301h/0302h returns to
     //   +0x60  32 real-mode callback addresses, one byte apart (0303h)
     //   +0x80  256 default protected-mode interrupt handlers, one byte each (0204h)
     static constexpr uint16_t kEntrySeg   = 0x00E0;
@@ -73,6 +74,7 @@ private:
     static constexpr uint16_t kOffSaveRm  = 0x30;
     static constexpr uint16_t kOffSavePm  = 0x40;
     static constexpr uint16_t kOffCbRet   = 0x50;
+    static constexpr uint16_t kOffRmRet   = 0x51;
     static constexpr uint16_t kOffCbBase  = 0x60;
     static constexpr int      kCallbacks  = 32;
     static constexpr uint16_t kOffPmInt   = 0x80;
@@ -140,6 +142,17 @@ private:
     // chains to the default handler is asking for the *host's* behaviour, and handing the
     // call back to the handler that just chained is a loop with no exit.
     bool in_default_ = false;
+
+    // 0301h/0302h: call a real-mode procedure, which unlike 0300h means actually running
+    // guest code and coming back afterwards. The state to restore lives here until the
+    // procedure returns to kOffRmRet.
+    struct RmCall { Cpu::State saved; uint32_t frame; };
+    RmCall rm_[4];
+    int rm_depth_ = 0;
+    void rm_call(bool iret_frame);
+    void rm_return();
+    void load_frame(uint32_t f);
+    void store_frame(uint32_t f);
 
     void switch_to_pm();
     void raw_switch(bool to_pm);

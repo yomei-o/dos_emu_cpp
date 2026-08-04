@@ -26,6 +26,7 @@ Dpmi::Dpmi(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
         if (off == kOffRawToPm)   { raw_switch(true);  return true; }
         if (off == kOffRawToRm)   { raw_switch(false); return true; }
         if (off == kOffCbRet)     { cb_return();       return true; }
+        if (off == kOffRmRet)     { rm_return();       return true; }
         if (off >= kOffCbBase && off < kOffCbBase + kCallbacks) {
             call_back(static_cast<int>(off - kOffCbBase)); return true;
         }
@@ -230,6 +231,107 @@ void Dpmi::pm_int_default(uint8_t n) {
     cpu_.flags = static_cast<uint16_t>((wide ? cpu_.pop32() : cpu_.pop16()) | 0x0002);
     cpu_.set_seg(CS, cs);
     cpu_.jump(ip);
+}
+
+// The 50-byte real-mode call structure, in and out. Shared by 0300h and 0301h/0302h.
+void Dpmi::load_frame(uint32_t f) {
+    cpu_.sd(DI, mem_.r32(f + 0x00)); cpu_.sd(SI, mem_.r32(f + 0x04));
+    cpu_.sd(BP, mem_.r32(f + 0x08)); cpu_.sd(BX, mem_.r32(f + 0x10));
+    cpu_.sd(DX, mem_.r32(f + 0x14)); cpu_.sd(CX, mem_.r32(f + 0x18));
+    cpu_.sd(AX, mem_.r32(f + 0x1C));
+    cpu_.flags = mem_.r16(f + 0x20);
+    // The segment fields are meant to hold real-mode paragraphs. A client reflecting a
+    // call it received in protected mode sometimes copies its own segment registers
+    // straight in — DOS/4GW does, for the DS of a write — and then the paragraph is a
+    // selector. Where that selector describes conventional memory at a paragraph
+    // boundary, the two are the same address said two ways, so say it the way real mode
+    // needs. Anything else is passed through untouched: a base above 1 MiB has no
+    // paragraph, and inventing one would be worse than the call failing.
+    auto as_paragraph = [&](uint16_t v) -> uint16_t {
+        if (!(v & 4) || !cpu_.desc_ok(v)) return v;          // not an LDT selector
+        const uint32_t base = cpu_.read_desc(v).base;
+        if (base >= 0x100000 || (base & 0xF)) return v;
+        return static_cast<uint16_t>(base >> 4);
+    };
+    cpu_.set_seg(ES, as_paragraph(mem_.r16(f + 0x22)));
+    cpu_.set_seg(DS, as_paragraph(mem_.r16(f + 0x24)));
+    cpu_.set_seg(FS, as_paragraph(mem_.r16(f + 0x26)));
+    cpu_.set_seg(GS, as_paragraph(mem_.r16(f + 0x28)));
+}
+
+void Dpmi::store_frame(uint32_t f) {
+    mem_.w32(f + 0x00, cpu_.gd(DI)); mem_.w32(f + 0x04, cpu_.gd(SI));
+    mem_.w32(f + 0x08, cpu_.gd(BP)); mem_.w32(f + 0x10, cpu_.gd(BX));
+    mem_.w32(f + 0x14, cpu_.gd(DX)); mem_.w32(f + 0x18, cpu_.gd(CX));
+    mem_.w32(f + 0x1C, cpu_.gd(AX));
+    mem_.w16(f + 0x20, cpu_.flags);
+    mem_.w16(f + 0x22, cpu_.sreg[ES]); mem_.w16(f + 0x24, cpu_.sreg[DS]);
+    mem_.w16(f + 0x26, cpu_.sreg[FS]); mem_.w16(f + 0x28, cpu_.sreg[GS]);
+}
+
+// INT 31h 0301h/0302h: call a real-mode procedure whose address is in the frame, rather
+// than an interrupt vector. This is how DOS/4GW passes DOS calls down — it reads the
+// real-mode INT 21h vector out of the IVT itself and calls it as a procedure — and it is
+// the reason the linker printed nothing at all: we answered 0302h with "unsupported", so
+// its reflector reported failure for every call, including the seven writes carrying its
+// own error message.
+//
+// Unlike 0300h, which the DOS layer services directly, this has to *run guest code* and
+// come back. So: drop to real mode with the frame's registers, push a return address that
+// the CPU hook recognises, and jump to the procedure. When it returns there, rm_return()
+// writes the registers back and restores the client. 0302h's procedure returns with IRET,
+// so it wants flags on the stack under the return address; 0301h's uses RETF.
+void Dpmi::rm_call(bool iret_frame) {
+    const uint32_t f = cpu_.lin(ES, cpu_.gd(DI));
+    if (rm_depth_ >= 4) {                                // four deep is already absurd
+        cpu_.set_flag(CF, true); cpu_.r[AX] = 0x8001; return;
+    }
+    RmCall& rc = rm_[rm_depth_++];
+    rc.saved = cpu_.save();
+    rc.frame = f;
+
+    const uint16_t target_cs = mem_.r16(f + 0x2C), target_ip = mem_.r16(f + 0x2A);
+    uint16_t ss = mem_.r16(f + 0x30), sp = mem_.r16(f + 0x2E);
+
+    cpu_.cr[0] &= ~1u;                                   // real mode
+    cpu_.ip_mask = 0xFFFFu; cpu_.cs_d = cpu_.ss_d = false;
+    load_frame(f);
+    if (!ss && !sp) { ss = scratch_stack_seg(); sp = 0x0F00; }
+    cpu_.set_seg(SS, ss); cpu_.r[SP] = sp;
+
+    // The client may have asked us to copy words from its stack onto the real-mode one;
+    // CX says how many. Its stack is where the frame said, in protected mode.
+    const uint16_t words = cpu_.r[CX] & 0xFF;
+    const uint32_t pm_sp = rc.saved.ss_d
+        ? (rc.saved.r[SP] | (static_cast<uint32_t>(rc.saved.rhi[SP]) << 16))
+        : rc.saved.r[SP];
+    for (int i = static_cast<int>(words) - 1; i >= 0; --i) {
+        const uint16_t v = mem_.r16(rc.saved.sbase[SS] + pm_sp + i * 2);
+        cpu_.r[SP] -= 2;
+        mem_.ww(cpu_.sreg[SS], cpu_.r[SP], v);
+    }
+    if (iret_frame) { cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], cpu_.flags); }
+    cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kEntrySeg);
+    cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kOffRmRet);
+
+    if (trace) printf("[dpmi] real-mode call %04X:%04X (%s frame), ax=%04X ds=%04X dx=%04X\n",
+                      target_cs, target_ip, iret_frame ? "iret" : "retf",
+                      cpu_.r[AX], cpu_.sreg[DS], cpu_.r[DX]);
+    cpu_.set_seg(CS, target_cs);
+    cpu_.jump(target_ip);
+}
+
+// The procedure returned. Hand its registers back through the frame and put the client
+// exactly as it was, which is what makes this transparent to a client that only knows it
+// asked for a DOS call.
+void Dpmi::rm_return() {
+    if (!rm_depth_) { cpu_.jump(cpu_.ip); return; }
+    RmCall& rc = rm_[--rm_depth_];
+    store_frame(rc.frame);
+    if (trace) printf("[dpmi] real-mode call returned ax=%04X flags=%04X\n",
+                      cpu_.r[AX], cpu_.flags);
+    cpu_.restore(rc.saved);
+    cpu_.set_flag(CF, false);                            // the DPMI call itself succeeded
 }
 
 // A selector over the whole first megabyte. A callback hands the client a pointer to the
@@ -577,6 +679,8 @@ bool Dpmi::int31() {
         case 0x0902: cpu_.sb(AX, cpu_.get_flag(IF) ? 1 : 0); ok(); break;   // get state
 
         case 0x0300: simulate_real_int(); break;         // simulate real-mode interrupt
+        case 0x0301: rm_call(false); break;             // call real-mode proc, RETF frame
+        case 0x0302: rm_call(true);  break;             // ...and with an IRET frame
         case 0x0303: {                                   // allocate real-mode callback
             int i = 0;
             while (i < kCallbacks && cb_[i].used) ++i;
