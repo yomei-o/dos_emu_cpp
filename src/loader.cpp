@@ -36,6 +36,20 @@ static void build_psp(Memory& mem, uint16_t psp_seg, const std::string& cmdline,
     // command tail at 0x80.
     mem.wb(psp_seg, 0x00, 0xCD); mem.wb(psp_seg, 0x01, 0x20);   // INT 20h
     mem.ww(psp_seg, 0x2C, env_seg);                            // environment segment
+
+    // The job file table: 20 bytes at 0x18 mapping this process's handles to DOS's
+    // system file table, the count at 0x32, and a far pointer to the table at 0x34.
+    // No 16-bit guest ever looked, but DJGPP's fstat() does, and its range check is
+    //
+    //     if (fhandle >= _farpeekw(_dos_ds, psp_addr + 0x32)) return -1;   -> EBADF
+    //
+    // With the field left at zero every handle is out of range, so fstat fails on a
+    // file that opened perfectly well. gcc 4.7's cc1 reports that as
+    // `fatal error: hello.c: Bad file descriptor` immediately after opening it.
+    for (int i = 0; i < 20; ++i) mem.wb(psp_seg, 0x18 + i, i < 5 ? i : 0xFF);
+    mem.ww(psp_seg, 0x32, 20);
+    mem.ww(psp_seg, 0x34, 0x0018);                             // offset of the table
+    mem.ww(psp_seg, 0x36, psp_seg);                            // ...and its segment
     std::string tail = cmdline;
     if (tail.size() > 126) tail.resize(126);
     mem.wb(psp_seg, 0x80, static_cast<uint8_t>(tail.size()));

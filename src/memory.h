@@ -26,13 +26,21 @@ public:
         return ((static_cast<uint32_t>(seg) << 4) + off) & 0xFFFFF;
     }
 
-    uint8_t  r8(uint32_t a)  const { return ram_[a & kMask]; }
-    uint16_t r16(uint32_t a) const { a &= kMask; return static_cast<uint16_t>(ram_[a] | (ram_[a + 1] << 8)); }
-    uint32_t r32(uint32_t a) const { a &= kMask; return ram_[a] | (ram_[a+1] << 8) | (ram_[a+2] << 16) | (static_cast<uint32_t>(ram_[a+3]) << 24); }
+    // DOSEMU_MEMCHK=1 reports accesses past the end of RAM instead of letting kMask
+    // fold them silently back into memory that is in use. This is the A20 problem in
+    // miniature: an address that wraps rather than faults turns a wild pointer into a
+    // quiet corruption somewhere else, and the crash surfaces far from the cause.
+    static bool check;
+    void oob(uint32_t a, const char* what) const;
+    void chk(uint32_t a, const char* what) const { if (check && a >= kSize) oob(a, what); }
 
-    void w8(uint32_t a, uint8_t v)   { ram_[a & kMask] = v; }
-    void w16(uint32_t a, uint16_t v) { a &= kMask; ram_[a] = v & 0xFF; ram_[a + 1] = v >> 8; }
-    void w32(uint32_t a, uint32_t v) { a &= kMask; ram_[a]=v&0xFF; ram_[a+1]=(v>>8)&0xFF; ram_[a+2]=(v>>16)&0xFF; ram_[a+3]=(v>>24)&0xFF; }
+    uint8_t  r8(uint32_t a)  const { chk(a, "r8"); return ram_[a & kMask]; }
+    uint16_t r16(uint32_t a) const { chk(a, "r16"); a &= kMask; return static_cast<uint16_t>(ram_[a] | (ram_[a + 1] << 8)); }
+    uint32_t r32(uint32_t a) const { chk(a, "r32"); a &= kMask; return ram_[a] | (ram_[a+1] << 8) | (ram_[a+2] << 16) | (static_cast<uint32_t>(ram_[a+3]) << 24); }
+
+    void w8(uint32_t a, uint8_t v)   { chk(a, "w8"); ram_[a & kMask] = v; }
+    void w16(uint32_t a, uint16_t v) { chk(a, "w16"); a &= kMask; ram_[a] = v & 0xFF; ram_[a + 1] = v >> 8; }
+    void w32(uint32_t a, uint32_t v) { chk(a, "w32"); a &= kMask; ram_[a]=v&0xFF; ram_[a+1]=(v>>8)&0xFF; ram_[a+2]=(v>>16)&0xFF; ram_[a+3]=(v>>24)&0xFF; }
 
     // segment:offset convenience
     uint8_t  rb(uint16_t s, uint16_t o) const { return r8(phys(s, o)); }

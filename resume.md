@@ -194,49 +194,70 @@ Ruled out along the way, so nobody re-checks them: `AH=62h` (the stub never call
 implemented anyway, and it *was* genuinely missing), and `_dos_ds` (the client builds it
 correctly as selector `0x4C`, base 0, limit `0x110FFF`).
 
-**Where the DJGPP toolchain stands.** `sh get_fixtures.sh djgpp` also installs a full
-DJGPP tree (djdev205 + gcc 3.4.6 + binutils 2.35.1) under `scratch_root/DJGPP`, and the
-loader now puts `DJGPP=A:\DJGPP\DJGPP.ENV` and its `bin` directory in the environment.
+**DJGPP compiles C, and the result runs.** `sh get_fixtures.sh djgpp` installs
+djdev205 + gcc 3.4.6 + binutils 2.35.1 under `scratch_root/DJGPP`, and the loader puts
+`DJGPP=A:\DJGPP\DJGPP.ENV` and its `bin` directory in the environment. Driving the
+passes by hand:
 
-Working:
+    cc1.exe   hello.c -quiet -O2 -o hello.s
+    as.exe    hello.s -o hello.o
+    ld.exe    -o hello.cof A:/DJGPP/lib/crt0.o hello.o               -LA:/DJGPP/lib -LA:/DJGPP/lib/gcc/djgpp/3.46 -lc -lgcc
+    stubify.exe hello.cof
+    ./dosemu --root scratch_root scratch_root/hello.exe
+    -> hello from DJGPP gcc, sum=55
 
-    ./dosemu --root scratch_root scratch_root/DJGPP/bin/gcc.exe -v
-    -> gcc version 3.4.6            (reads DJGPP.ENV, finds its installation)
-    ./dosemu --root scratch_root scratch_root/DJECHO.EXE hello world   -> hello world
-    ./dosemu --root scratch_root scratch_root/dtou.exe -> Usage: dtou.exe [-b] ...
+That is a 32-bit protected-mode program, compiled from C by gcc inside the emulator,
+running under the built-in DPMI host. `-lgcc` is not optional: printf pulls in
+`__udivdi3`/`__umoddi3`.
 
-**Not working: `cc1` aborts.** `gcc -O2 hello.c -o hello.exe` spawns cc1 — the nested
-EXEC out of protected mode works — and cc1 runs ~94 million instructions before calling
-`abort()`. It does the same standalone (`cc1.exe hello.c -quiet -o hello.s`), so the
-driver is not involved. `cpp.exe hello.c` is the smaller version of the same failure: it
-stats the source, never opens it, and exits 0 with no output.
+**⏭ The one gap: the `gcc` driver.** `gcc -O2 hello.c -o hello.exe` creates its
+temporary `.s`, spawns cc1 — and cc1 hangs, producing nothing, though the *same* cc1
+with the *same* arguments works standalone. So it is something about running as an EXEC
+child of a protected-mode parent, not about cc1. `Dos::exec` now saves and restores the
+whole `Cpu::State` rather than just `r[]`/`sreg[]` (it has to: cr0 and the descriptor
+cache decide how those registers are read), which was certainly a bug, but it was not
+this one. Next: sample the child with `DOSEMU_SAMPLE` the way the SFT loop was found.
 
-Ruled out, with evidence, so nobody repeats them:
-- **Not the FPU.** `DOSEMU_STATS=1` counts x87 escapes swallowed as no-ops: 53 across
-  93.7M instructions, i.e. startup probing only. cc1 does its real arithmetic in
-  software. (The `Coprocessor not present` banner every DJGPP program prints is just
-  `0303h` + `0E01h` being unimplemented; it is cosmetic.)
-- **Not memory exhaustion.** cc1 asks 0501h for three blocks totalling ~19 MiB, which is
-  why `Memory::kSize` is now 64 MiB. Undersized, 0501h succeeded and the writes wrapped
-  at `kMask`; that is fixed and the abort is unchanged.
-- **Not missing DOS calls.** Everything cc1 reaches for is implemented; `AH=5Dh` (get
-  SDA) is the only refusal left and DJGPP's own `lstat.c` treats that failure as
-  non-fatal by design.
-- **Not argv or the environment** — both verified working on smaller DJGPP programs.
+**Four bugs, all the same shape.** Every one of these let the guest keep running on an
+answer that was well-formed and wrong, so the damage surfaced far away:
 
-So it is very likely a **CPU bug in 32-bit protected mode** that only code as large as
-cc1 reaches. The way to find it is the differential trace that found the `ip_mask` bug,
-but there is no known-good build to diff against, so the practical route is a smaller
-reproducer: `cpp.exe` is already 1/5 the work and fails the same way, and its last useful
-act is a `stat()` on the source. Start by tracing what `cpp` does between that stat and
-its silent exit.
+- **PSP had no file-handle table.** Offsets 0x18 (the 20-byte JFT), 0x32 (count) and
+  0x34 (far pointer) were never filled in. No 16-bit guest looks — a .COM gets
+  DS=ES=PSP and keeps it — but DJGPP's `fstat` starts with
+  `if (fhandle >= _farpeekw(_dos_ds, psp_addr + 0x32)) return -1;`, and against a zero
+  every handle is out of range. gcc 4.7's cc1 says `hello.c: Bad file descriptor` about
+  a file it just opened successfully.
+- **`AH=52h` returned a zeroed scratch area.** DJGPP's fstat deliberately does not check
+  CF here and walks the SFT chain from `LoL+4` until a next-pointer of `0xFFFF`. Zeros
+  never terminate: cc1 spun there **forever**, at 20 M instructions/sec. It now returns a
+  well-formed *empty* structure (SFT list = `0xFFFF:0xFFFF`), so `get_sft_entry` exits at
+  once and returns -2, which fstat reads as "no SFT" and falls back to ordinary DOS
+  calls. Inventing SFT contents would have been the same mistake in the other direction.
+- **`AH=57h` (get file date) was missing** — it is fstat's *trusted* fallback once the
+  SFT is unavailable. Now returns the same fixed timestamp FindFirst reports, so the two
+  agree about a file.
+- **`AH=5Bh` (create new file) was missing** — how a program claims a temporary name
+  without a race. Without it the driver stops at `Cannot create temporary file`.
 
-**A dead end, recorded so it is not retried:** giving the environment block an MCB. The
-theory was that DJGPP's stub sizes the environment from the MCB in the paragraph below
-it. It does not need to, it changed nothing — and a lone `'M'` (not-last) MCB tells
-anything that walks the chain to step into the PSP, which **broke FreeCOM**: every
-command came back `Bad command or filename`. There is no MCB chain in this emulator and
-adding one link is worse than having none.
+**The x87 is implemented** (`src/fpu.cpp`): eight doubles as the register stack, exact
+m32/m64/m80 and integer memory formats, compares through C0/C2/C3, FLDCW/FNSTSW/FNINIT.
+Swallowing D8-DF as no-ops had been fine for LSI C, which does floating point in
+software, but cc1 executes 35 x87 instructions during startup — and a no-op FPU is the
+worst kind of stub, because the program computes with whatever was in the register and
+carries on. `0x9B` (FWAIT) was also missing. Note that the FPU turned out *not* to be
+what made cc1 abort; it was necessary but not sufficient.
+
+**Diagnostics that earned their keep**, all in the shipped build:
+`DOSEMU_SAMPLE=N` (print CS:EIP every N instructions — found the SFT loop in seconds),
+`DOSEMU_OPHIST=1` (per-opcode counts; diffing a working program against a failing one
+narrowed the suspects to seven instructions, five of them x87),
+`DOSEMU_WATCH=lo-hi` (data accesses in a linear range, in `lin()` so it catches string
+ops), `DOSEMU_MEMCHK=1` (accesses past the end of RAM instead of wrapping at `kMask`),
+`DOSEMU_STATS=1`, `DOSEMU_FPU_TRACE=1`, and file paths in the DPMI trace.
+
+For the record, the interpreter is **21.7 M instructions/sec** (the whole LSI C pass
+chain, 5.26 M instructions, in 0.24 s). When something takes minutes it is looping, not
+slow — measure before optimising.
 
 **Also unimplemented, and harmless so far** — every DJGPP program opens with
 `Warning: Coprocessor not present and DPMI setup failed!`. That is exactly two missing

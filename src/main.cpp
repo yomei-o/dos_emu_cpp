@@ -83,6 +83,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::fflush(stdout);
+    if (getenv("DOSEMU_OPHIST"))
+        for (int i = 0; i < 512; ++i)
+            if (cpu.ophist[i])
+                std::fprintf(stderr, "[op] %s%02X %llu\n", i < 256 ? "" : "0F", i & 0xFF,
+                             (unsigned long long)cpu.ophist[i]);
     if (getenv("DOSEMU_STATS"))
         std::fprintf(stderr, "[stats] %llu instructions, %llu x87 escapes no-opped\n",
                      (unsigned long long)cpu.insns, (unsigned long long)cpu.fpu_ops);

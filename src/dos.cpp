@@ -8,6 +8,16 @@
 
 namespace dosemu {
 
+// A spare paragraph below the environment block (the DPMI entry owns 0x00E0) used to
+// hand out the DOS list-of-lists. Nothing else lives between the BIOS data area and
+// the environment at 0x00F0.
+static constexpr uint16_t kLolSeg = 0x00E1;
+
+// One timestamp for every file. Not a real mtime, but the *same* answer from
+// FindFirst and from get-file-time, so a program that cross-checks them agrees.
+static constexpr uint16_t kFixedDate = ((1993 - 1980) << 9) | (8 << 5) | 19;
+static constexpr uint16_t kFixedTime = (12 << 11);
+
 bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&, uint16_t);
 
 void Dos::terminate(int code) {
@@ -36,19 +46,20 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     std::string tail;
     for (uint8_t i = 0; i < taillen; ++i) { char c = static_cast<char>(mem_.rb(cmd_seg, cmd_off + 1 + i)); if (c == '\r') break; tail += c; }
 
-    // Save the parent's whole context.
-    uint16_t sr[8], ss[4], sip = cpu_.ip, sfl = cpu_.flags, spsp = psp_seg, sheap = heap_next_;
-    for (int i = 0; i < 8; ++i) sr[i] = cpu_.r[i];
-    for (int i = 0; i < 4; ++i) ss[i] = cpu_.sreg[i];
+    // Save the parent's whole context. Cpu::save() rather than a hand-rolled copy of
+    // r[] and sreg[]: once the parent can be a protected-mode program, cr0, the
+    // descriptor cache, cs_d/ss_d and ip_mask decide how those registers are even
+    // read. A child that switches to protected mode and exits would otherwise leave
+    // the parent running with the child's addressing.
+    const Cpu::State parent = cpu_.save();
+    uint16_t spsp = psp_seg, sheap = heap_next_;
 
     uint16_t child_psp = heap_next_;
     heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
 
     std::string err;
     if (!load_program(file, cpu_, child_psp, tail, err, name, mem_.rw(pb_seg, pb_off))) {
-        for (int i = 0; i < 8; ++i) cpu_.r[i] = sr[i];
-        for (int i = 0; i < 4; ++i) cpu_.sreg[i] = ss[i];
-        cpu_.ip = sip; cpu_.flags = sfl; psp_seg = spsp; heap_next_ = sheap;
+        cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap;
         cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
     }
     psp_seg = child_psp;
@@ -62,9 +73,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     child_exited_ = saved_exited;
 
     // Restore the parent and hand it the child's exit code (via AH=4Dh).
-    for (int i = 0; i < 8; ++i) cpu_.r[i] = sr[i];
-    for (int i = 0; i < 4; ++i) cpu_.sreg[i] = ss[i];
-    cpu_.ip = sip; cpu_.flags = sfl; psp_seg = spsp; heap_next_ = sheap;
+    cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap;
     last_child_code_ = code;
     cpu_.flags &= ~CF; cpu_.r[AX] = 0;
     return true;
@@ -105,7 +114,7 @@ bool Dos::find_first(const std::string& spec, uint16_t attr) {
     if (s != std::string::npos) { pat = spec.substr(s + 1); dir = spec.substr(0, s + 1); }
     else { pat = spec; dir = ""; }
     if (pat.empty()) pat = "*";
-    const uint16_t date = ((1993 - 1980) << 9) | (8 << 5) | 19, time = (12 << 11);
+    const uint16_t date = kFixedDate, time = kFixedTime;
     bool wantDirs = (attr & 0x10) != 0;
     // "." and ".." in a real (non-root) subdirectory when directories are requested
     if (wantDirs && files_.normalize(dir.empty() ? "." : dir) != "\\") {
@@ -144,6 +153,13 @@ void Dos::write_dta_entry() {
 
 bool Dos::handle(uint8_t n) {
     switch (n) {
+        // A CPU exception, not a service call. Nothing here can handle one, but
+        // silently returning would leave the guest running on the garbage that caused
+        // it -- so say so. Under a real DPMI host these become SIGFPE and friends.
+        case 0x00: case 0x01: case 0x03: case 0x04: case 0x06: case 0x0C: case 0x0D:
+            std::fprintf(stderr, "[cpu] exception INT %02Xh at %04X:%08X (unhandled)\n",
+                         n, cpu_.sreg[CS], cpu_.ip);
+            return true;
         case 0x20: terminate(0); return true;           // terminate program
         case 0x21: return int21();
         case 0x16: {                                     // BIOS keyboard services
@@ -306,8 +322,23 @@ bool Dos::int21() {
             if ((cpu_.r[AX] & 0xFF) == 0) { cpu_.sb(AX, 0); cpu_.r[DX] = (cpu_.r[DX] & 0xFF00) | '/'; }
             else cpu_.sb(AX, 0);
             return true;
-        case 0x52:                                                  // get list of lists (SysVars) -> ES:BX
-            cpu_.sreg[ES] = 0x0090; cpu_.r[BX] = 0x0000;            // a zeroed scratch area
+        // Get the DOS "list of lists" (undocumented, AH=52h) -> ES:BX. Pointing at a
+        // zeroed scratch area is not a safe non-answer: DJGPP's fstat() deliberately
+        // does not check CF here ("Ralph Brown's Interrupt List doesn't say FLAGS are
+        // set"), takes ES:BX as given, and walks the System File Table chain from
+        // LoL+4 until a next-pointer of 0xFFFF. Zeros mean it never terminates — gcc's
+        // cc1 spun there forever, 20 million instructions a second going nowhere.
+        //
+        // So the structure has to be well-formed and *empty*: an SFT list pointer of
+        // 0xFFFF:0xFFFF. get_sft_entry() exits its loop at once and returns -2, which
+        // fstat reads as "SFT unavailable" and falls back to ordinary DOS calls. That
+        // is an answer we can give truthfully; inventing SFT contents would be the
+        // same "success but blank" mistake as the FreeCOM NLS lesson below.
+        case 0x52:
+            for (int i = 0; i < 32; ++i) mem_.wb(kLolSeg, i, 0);
+            mem_.ww(kLolSeg, 0x0E, 0xFFFF);          // LoL-2: first MCB segment: none
+            mem_.wd(kLolSeg, 0x14, 0xFFFFFFFF);      // LoL+4: SFT chain: empty
+            cpu_.set_seg(ES, kLolSeg); cpu_.r[BX] = 0x0010;
             return true;
         case 0x29: {                                                // parse filename (DS:SI) into an FCB (ES:DI)
             uint16_t sseg = cpu_.sreg[DS], si = cpu_.r[SI];
@@ -354,6 +385,17 @@ bool Dos::int21() {
         }
         case 0x3C: {                                                // create file (CX attr, DS:DX name) -> handle
             int h = files_.create(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]), cpu_.r[CX]);
+            if (h < 0) { cpu_.flags |= CF; cpu_.r[AX] = -h; } else { cpu_.flags &= ~CF; cpu_.r[AX] = h; }
+            return true;
+        }
+        // Create a *new* file: like 3Ch but it must not already exist. This is how a
+        // program claims a unique temporary name without a race, and gcc's driver uses
+        // it for every intermediate file — without it, `Cannot create temporary file`
+        // and the compile stops before the assembler ever runs.
+        case 0x5B: {
+            const std::string p = read_asciiz(cpu_.sreg[DS], cpu_.r[DX]);
+            if (files_.exists(p)) { cpu_.flags |= CF; cpu_.r[AX] = 80; return true; }  // already exists
+            int h = files_.create(p, cpu_.r[CX]);
             if (h < 0) { cpu_.flags |= CF; cpu_.r[AX] = -h; } else { cpu_.flags &= ~CF; cpu_.r[AX] = h; }
             return true;
         }
@@ -445,6 +487,16 @@ bool Dos::int21() {
         // success with BX untouched. The stub then believed the PSP was wherever BX
         // happened to point and read an empty command tail from it, which is why
         // every DJGPP program started with argc == 0.
+        // Get/set a file's date and time by handle. This is fstat()'s *trusted* source:
+        // having decided the SFT is unavailable it falls back to
+        //   if (_getftime(fhandle, &t) == 0 && __filelength(fhandle) != -1) ...
+        // and if that fails too it has nothing left and gives up. The same fixed
+        // timestamp find_first() reports, so the two agree about a file.
+        case 0x57:
+            if ((cpu_.r[AX] & 0xFF) == 0) {                          // get
+                cpu_.r[CX] = kFixedTime; cpu_.r[DX] = kFixedDate;
+            }
+            cpu_.flags &= ~CF; return true;                          // set: accept
         case 0x51: case 0x62: cpu_.r[BX] = psp_seg; return true;    // get PSP -> BX
         case 0x50: psp_seg = cpu_.r[BX]; return true;               // set PSP
         // TRUENAME (DS:SI -> ES:DI). gcc canonicalises every path it touches, so this

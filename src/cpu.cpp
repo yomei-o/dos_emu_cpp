@@ -17,6 +17,10 @@
 
 namespace dosemu {
 
+bool Cpu::fpu_trace = getenv("DOSEMU_FPU_TRACE") != nullptr;
+uint64_t Cpu::sample_every = [] { const char* s = getenv("DOSEMU_SAMPLE");
+    return s ? strtoull(s, nullptr, 10) : 0ull; }();
+
 uint32_t Cpu::watch_lo = [] { const char* s = getenv("DOSEMU_WATCH");
     return s ? (uint32_t)strtoul(s, nullptr, 16) : 0u; }();
 uint32_t Cpu::watch_hi = [] { const char* s = getenv("DOSEMU_WATCH");
@@ -77,6 +81,10 @@ void Cpu::step() {
         throw CpuError{"instruction limit exceeded (runaway program?)", sreg[CS], static_cast<uint16_t>(ip)};
     // The DPMI mode-switch entry: reaching it runs the host switch, not an instruction.
     if (pm_switch_addr != 0xFFFFFFFFu && on_pm_switch && lin(CS, ip) == pm_switch_addr) { on_pm_switch(); return; }
+    if (sample_every && !sample_left--) {
+        sample_left = sample_every;
+        printf("[sample] %04X:%08X after %llu\n", sreg[CS], ip, (unsigned long long)insns);
+    }
     Decode d;
     uint8_t op;
 
@@ -103,6 +111,7 @@ void Cpu::step() {
     // and 16-bit code segments, 32 in a 32-bit code segment).
     bool o32 = d.o32 ^ cs_d;
     bool a32 = d.a32 ^ cs_d;
+    ++ophist[op];
 
     // ---- ModRM decode (16- or 32-bit addressing) ----
     auto decode_modrm = [&](Modrm& m) {
@@ -246,6 +255,7 @@ void Cpu::step() {
     // ---- 0x0F two-byte opcodes (80386) ----
     auto do_0f = [&]() {
         uint8_t op2 = fetch8();
+        ++ophist[256 + op2];
         // long Jcc rel16/32
         if (op2 >= 0x80 && op2 <= 0x8F) {
             int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16());
@@ -448,6 +458,7 @@ void Cpu::step() {
         case 0x8F: { Modrm m; decode_modrm(m); wvm(m, popV()); break; }              // POP rm
 
         case 0x90: break;   // NOP (XCHG AX,AX)
+        case 0x9B: break;   // FWAIT: nothing to wait for, the FPU here is synchronous
         case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: {
             uint32_t t = grw(AX); srw(AX, grw(op & 7)); srw(op & 7, t); break; }     // XCHG AX, r
         case 0x98: if (o32) sd(AX, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(r[AX])))); // CWDE
@@ -639,7 +650,10 @@ void Cpu::step() {
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: {
             Modrm m; decode_modrm(m);
             ++fpu_ops;
-            if (op == 0xDF && m.mod == 3 && m.reg == 4) r[AX] = 0;   // FNSTSW AX
+            fpu_exec(op, m.reg, m.mod, m.rm, m.is_reg ? 0 : pa(m));
+            if (fpu_trace)
+                printf("[x87] %02X /%d mod=%d rm=%d -> st0=%g st1=%g top=%d fsw=%04X\n",
+                       op, m.reg, m.mod, m.rm, fst[ftop & 7], fst[(ftop + 1) & 7], ftop, fsw);
             break;
         }
 

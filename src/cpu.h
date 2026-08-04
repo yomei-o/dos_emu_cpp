@@ -178,6 +178,30 @@ public:
     // point will silently compute garbage, so this is the first thing to check when a
     // program aborts for no visible reason.
     uint64_t fpu_ops = 0;
+    // Execution count per opcode: 0..255 for the one-byte map, 256+n for the 0F map.
+    // When a big program misbehaves and a small one does not, the instructions the big
+    // one uses and the small one never touches are the suspect list — and it is a short
+    // list. Cheaper than any tracing, and it needs no reference implementation.
+    uint64_t ophist[512] = {0};
+    static bool fpu_trace;      // DOSEMU_FPU_TRACE: log every x87 escape
+    // DOSEMU_SAMPLE=N prints CS:EIP every N instructions. A guest that stops making
+    // progress looks identical to one doing a lot of work; sampling the instruction
+    // pointer tells the two apart in seconds and points straight at the loop.
+    static uint64_t sample_every;
+    uint64_t sample_left = 0;
+
+    // ---- x87 ----------------------------------------------------------------
+    // A register stack of eight doubles. Real hardware keeps 80-bit extended values;
+    // a double is 53 bits of mantissa against 64, which is invisible to everything we
+    // run — DJGPP's own FPU emulator makes the same trade. What is NOT optional is
+    // having the registers at all: swallowing the escapes as no-ops lets a program
+    // compute with whatever was in memory and carry on, which is how gcc's cc1 came to
+    // abort 556K instructions in with no other symptom.
+    double fst[8] = {0};
+    int    ftop = 0;                 // ST(i) is fst[(ftop + i) & 7]
+    uint16_t fcw = 0x037F;           // control word (round-to-nearest, all masked)
+    uint16_t fsw = 0;                // status word; condition codes C0/C2/C3
+    void fpu_exec(uint8_t op, int reg, int mod, int rm, uint32_t addr);
     uint64_t max_insns = 0;   // 0 = unlimited; otherwise stop with an error (runaway guard)
 
     void set_flag(uint32_t f, bool on) { if (on) flags |= f; else flags &= ~f; }
