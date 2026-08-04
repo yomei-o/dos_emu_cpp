@@ -210,32 +210,24 @@ That is a 32-bit protected-mode program, compiled from C by gcc inside the emula
 running under the built-in DPMI host. `-lgcc` is not optional: printf pulls in
 `__udivdi3`/`__umoddi3`.
 
-**⏭ The one gap: the `gcc` driver, and it is narrowed to one number.** `gcc -O2
-hello.c -o hello.exe` creates its temporary `.s`, spawns cc1 — the nested EXEC out of
-protected mode works — and the child dies. Traced with `DOSEMU_DPMI_TRACE`, the child's
-last moments are:
+**The driver works too, and the bug was a register leak across EXEC.** `gcc -O2
+hello.c -o hello.exe` runs the whole chain — cc1, as, ld, and the final rename — and
+the program it builds runs. So does `gpp -O2 mini.cpp -o mini.exe`, virtual functions
+and templates included.
 
-    int31 0501 BX=0042 CX=0000  -> ok      the stub allocates 0x00420000 for the image
-    int31 0006 BX=0094          -> 0042:0000   crt0 reads that block's base back
-    int31 0501 BX=8084 CX=0000  -> FAIL    crt0 then asks for 0x80840000 -- 2.1 GB
+The child cc1 had been dying because `load_program` set `r[SP]` and left **`rhi[SP]`
+holding the parent's ESP high half**. Sixteen-bit code cannot observe the upper halves
+of EAX..EDI, so nothing had ever noticed; a DOS extender can. The child started with
+SP=0x0760 but ESP=0x00200760, and because its stack segment was 16-bit, `PUSH` used SP
+while `mov ecx,[esp+4]` addressed through the full ESP — a read 2 MiB from the write.
+sbrk() read its own argument as garbage, asked DPMI for 2.1 GB, was refused, and the
+whole child tore itself down. The same cc1 run directly was fine: nothing had run
+before it to leave anything in `rhi[]`.
 
-and the stub takes its failure path, frees its selectors and exits. The `[gp] loaded CS
-with the null selector` messages that follow are that teardown, not the cause.
-
-**0x80840000 is `0x00420000 * 2` with bit 31 set.** Standalone, the same cc1 asks for a
-sane growing sequence (0x6C0000, 0x7C0000, 0x7E0000, …) and succeeds. So the arithmetic
-that produces the size is being fed, or computing, something different when cc1 runs as
-a child — and one spurious high bit is the whole difference. Note the child never calls
-0500h (get free memory information), so it is not our answer to that.
-
-Next step: watch the instructions that produce that value. `0006h` returns the base in
-CX:DX, so put `DOSEMU_WATCH` on the child's stub-info block, or single-step from the
-`0006h` return to the `0501h` call — it is a few dozen instructions apart and the
-sampler already gives the exact CS:EIP of both.
-
-Ruled out on the way: `Dos::exec` was saving only `r[]`/`sreg[]` and not the
-protected-mode state — a genuine bug, fixed with `Cpu::save()/restore()`, but not this
-one. So was the descriptor cache surviving a PE->real transition (below).
+Found by narrowing, not by guessing: `DOSEMU_SAMPLE` showed the child spinning, the
+DPMI trace showed the absurd 0501h size, `DOSEMU_TRACE=lo-hi` printed the 55
+instructions that computed it, and `objdump` on cc1.exe at that address showed
+`mov 0x4(%esp),%ecx` — at which point printing ESP alongside SP made it obvious.
 
 **Four bugs, all the same shape.** Every one of these let the guest keep running on an
 answer that was well-formed and wrong, so the damage surfaced far away:
@@ -270,6 +262,17 @@ answer that was well-formed and wrong, so the damage surfaced far away:
   base is still `selector<<4` — that wrap is the A20 line, not segmentation: with the
   gate off address bit 20 does not exist and FFFF:0010 comes out at 0. A base that came
   from a descriptor is not a paragraph and must never be wrapped.
+
+- **`INT 21h AH=56h` (rename) was missing** — the last step of every compile. The
+  driver builds `hello.000` and renames it into place, so gcc did all the work and
+  then threw it away with `rename ... failed`.
+- **DPMI 0502h (free memory) was a no-op.** A bump allocator was fine while clients
+  allocated once, but DJGPP's sbrk grows the heap by allocating a bigger block,
+  copying, and freeing the old one — so every growth step leaked the previous heap and
+  consumption went quadratic. There is a real first-fit allocator now, with adjacent
+  free blocks merged. (Its first version took a `Block&` and then `push_back`ed into
+  the same vector, which invalidated the reference and broke the C compile that had
+  just started working. Index, not reference.)
 
 **The x87 is implemented** (`src/fpu.cpp`): eight doubles as the register stack, exact
 m32/m64/m80 and integer memory formats, compares through C0/C2/C3, FLDCW/FNSTSW/FNINIT.

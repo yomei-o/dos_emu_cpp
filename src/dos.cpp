@@ -497,6 +497,17 @@ bool Dos::int21() {
                 cpu_.r[CX] = kFixedTime; cpu_.r[DX] = kFixedDate;
             }
             cpu_.flags &= ~CF; return true;                          // set: accept
+        // Rename (DS:DX old -> ES:DI new). The last step of every compile: the driver
+        // builds `hello.000` and renames it into place, so without this gcc does all
+        // the work and then throws it away with `rename ... failed`.
+        case 0x56: {
+            const std::string from = files_.host_path(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]));
+            const std::string to   = files_.host_path(read_asciiz(cpu_.sreg[ES], cpu_.r[DI]));
+            std::error_code ec;
+            std::filesystem::rename(from, to, ec);
+            if (ec) { cpu_.flags |= CF; cpu_.r[AX] = 2; } else cpu_.flags &= ~CF;
+            return true;
+        }
         case 0x51: case 0x62: cpu_.r[BX] = psp_seg; return true;    // get PSP -> BX
         case 0x50: psp_seg = cpu_.r[BX]; return true;               // set PSP
         // TRUENAME (DS:SI -> ES:DI). gcc canonicalises every path it touches, so this

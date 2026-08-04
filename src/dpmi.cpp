@@ -212,6 +212,50 @@ void Dpmi::simulate_real_int() {
     cpu_.set_flag(CF, false);                            // 0300h itself succeeded
 }
 
+// First-fit over a list of blocks, with adjacent free blocks merged. Deliberately
+// simple, but it must actually reclaim: DJGPP's sbrk grows the heap by allocating a
+// larger block, copying into it and freeing the old one, so a free that does nothing
+// makes each growth step leak the entire previous heap.
+uint32_t Dpmi::alloc_mem(uint32_t len) {
+    len = (len + 0xFFF) & ~0xFFFu;                       // page granularity
+    if (!len) len = 0x1000;
+    // Index, not a reference: the push_back below can reallocate the vector, and
+    // writing through a reference taken before it is a use-after-free.
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        if (blocks_[i].used || blocks_[i].len < len) continue;
+        const uint32_t base = blocks_[i].base, have = blocks_[i].len;
+        blocks_[i].len = len; blocks_[i].used = true;
+        if (have > len) blocks_.push_back({base + len, have - len, false});
+        return base;
+    }
+    if (static_cast<uint64_t>(heap_next_) + len > Memory::kSize) return 0;
+    const uint32_t base = heap_next_;
+    heap_next_ += len;
+    blocks_.push_back({base, len, true});
+    return base;
+}
+
+bool Dpmi::free_mem(uint32_t base) {
+    size_t f = blocks_.size();
+    for (size_t i = 0; i < blocks_.size(); ++i)
+        if (blocks_[i].used && blocks_[i].base == base) { f = i; break; }
+    if (f == blocks_.size()) return false;
+    blocks_[f].used = false;
+    // Absorb any free block that starts where this one ends, so a grow/copy/free cycle
+    // reuses the space instead of leaving a staircase of unusable gaps behind.
+    for (bool merged = true; merged; ) {
+        merged = false;
+        for (size_t i = 0; i < blocks_.size(); ++i)
+            if (i != f && !blocks_[i].used && blocks_[i].len &&
+                blocks_[i].base == blocks_[f].base + blocks_[f].len) {
+                blocks_[f].len += blocks_[i].len;
+                blocks_[i].len = 0;                 // len 0 never satisfies a request
+                merged = true;
+            }
+    }
+    return true;
+}
+
 // A scratch real-mode stack for reflected interrupts, allocated on first use so a
 // program that never reflects anything does not pay for it.
 uint16_t Dpmi::scratch_stack_seg() {
@@ -335,14 +379,15 @@ bool Dpmi::int31() {
         }
         case 0x0501: {                                   // allocate memory block
             const uint32_t len = (static_cast<uint32_t>(cpu_.r[BX]) << 16) | cpu_.r[CX];
-            const uint32_t base = heap_next_;
-            if (static_cast<uint64_t>(base) + len > Memory::kSize) { fail(0x8013); break; }
-            heap_next_ = (base + len + 0xFFF) & ~0xFFFu;
+            const uint32_t base = alloc_mem(len);
+            if (!base) { fail(0x8013); break; }
             cpu_.r[BX] = static_cast<uint16_t>(base >> 16); cpu_.r[CX] = static_cast<uint16_t>(base);
             cpu_.r[SI] = static_cast<uint16_t>(base >> 16); cpu_.r[DI] = static_cast<uint16_t>(base);
-            ok(); break;                                 // handle == address, we never free
+            ok(); break;                                 // handle == address
         }
-        case 0x0502: ok(); break;                        // free memory block: bump allocator
+        case 0x0502:                                     // free memory block (SI:DI = handle)
+            free_mem((static_cast<uint32_t>(cpu_.r[SI]) << 16) | cpu_.r[DI]);
+            ok(); break;
         case 0x0600: case 0x0601: case 0x0602: case 0x0603:
             ok(); break;                                 // lock/unlock: no paging here
         case 0x0604: cpu_.r[BX] = 0; cpu_.r[CX] = 0x1000; ok(); break;   // page size

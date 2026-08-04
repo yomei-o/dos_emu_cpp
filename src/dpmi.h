@@ -15,6 +15,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <vector>
 #include "cpu.h"
 #include "memory.h"
 
@@ -64,6 +65,16 @@ private:
     // Extended memory handed out by function 0501h starts here.
     static constexpr uint32_t kHeapBase = 0x00200000;    // 2 MiB
     uint32_t heap_next_ = kHeapBase;
+
+    // Allocated blocks, so 0502h can actually give memory back. A bump allocator was
+    // fine while clients allocated once, but DJGPP's sbrk grows the heap by allocating
+    // a bigger block, copying, and freeing the old one — so with a no-op free, every
+    // growth step leaks the previous heap and consumption goes quadratic. cc1plus
+    // walked off the end of 64 MiB doing that.
+    struct Block { uint32_t base, len; bool used; };
+    std::vector<Block> blocks_;
+    uint32_t alloc_mem(uint32_t len);
+    bool free_mem(uint32_t base);
 
     int next_sel_ = 1;                                   // LDT index, 0 is the null one
 
