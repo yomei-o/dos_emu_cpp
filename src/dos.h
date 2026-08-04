@@ -41,12 +41,15 @@ public:
     // for the protected-mode client — after which it is no longer a segment and the
     // DOS layer cannot use it to build a child's environment.
     uint16_t env_seg = 0;
+    // The DOS path of the running program, as it appears after the environment
+    // strings. A child inherits *this*, not its own name — see make_child_env().
+    std::string prog_path;
 
     // Fill in the PSP fields the loader cannot know: who the parent is, and where this
     // program's memory block ends. Call after load_program(). A program that only ever
     // reads its command tail never looks at these; one that has to find the program
     // that launched it does, and Watcom's W32RUN is exactly that.
-    void init_psp(uint16_t psp, uint16_t parent);
+    void init_psp(uint16_t psp, uint16_t parent, const std::string& path);
 
 private:
     uint16_t make_child_env(uint16_t parent_env, const std::string& child_name);

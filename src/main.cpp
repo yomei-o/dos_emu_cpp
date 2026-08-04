@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     dos.psp_seg = 0x0100;
-    dos.init_psp(0x0100, 0x0100);   // no real parent; point at itself, as DOS does for the shell
+    dos.init_psp(0x0100, 0x0100, dos_name);   // no real parent; point at itself, as DOS does for the shell
 
     try {
         cpu.run();

@@ -467,6 +467,21 @@ void Cpu::step() {
             pushV(sp);      pushV(grw(BP)); pushV(grw(SI)); pushV(grw(DI)); break; }
         case 0x61: { srw(DI, popV()); srw(SI, popV()); srw(BP, popV()); popV();
             srw(BX, popV()); srw(DX, popV()); srw(CX, popV()); srw(AX, popV()); break; }
+        // BOUND r, m — an 80186 array-bounds check: the memory operand holds the lower
+        // and upper limits back to back, and an index outside them raises INT 5. Rarely
+        // emitted by C compilers, but Watcom's loader uses it.
+        case 0x62: { Modrm m; decode_modrm(m);
+            if (!m.is_reg) {
+                const int32_t idx = static_cast<int32_t>(o32 ? gd(m.reg)
+                                        : static_cast<int16_t>(r[m.reg]));
+                const uint32_t a = pa(m);
+                const int32_t lo = o32 ? static_cast<int32_t>(mem_.r32(a))
+                                       : static_cast<int16_t>(mem_.r16(a));
+                const int32_t hi = o32 ? static_cast<int32_t>(mem_.r32(a + 4))
+                                       : static_cast<int16_t>(mem_.r16(a + 2));
+                if (idx < lo || idx > hi) interrupt(5);
+            }
+            break; }
         // PUSH imm
         case 0x68: pushV(fetchImmV()); break;
         case 0x6A: pushV(static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(fetch8())))); break;
@@ -491,7 +506,9 @@ void Cpu::step() {
             int8_t rel = static_cast<int8_t>(fetch8()); if (cc(op & 0xF)) jump(ip + rel); break; }
 
         // Group 1: ALU rm, imm  (80/81/83)
-        case 0x80: { Modrm m; decode_modrm(m); uint8_t imm = fetch8(); uint8_t v = alu8(m.reg, r8m(m), imm); if (m.reg != 7) w8m(m, v); break; }
+        // 0x82 is an undocumented alias of 0x80 that every x86 implements, and real
+        // assemblers do emit it. Same encoding, same behaviour.
+        case 0x80: case 0x82: { Modrm m; decode_modrm(m); uint8_t imm = fetch8(); uint8_t v = alu8(m.reg, r8m(m), imm); if (m.reg != 7) w8m(m, v); break; }
         case 0x81: { Modrm m; decode_modrm(m); uint32_t imm = fetchImmV(); uint32_t v = aluv(m.reg, rvm(m), imm); if (m.reg != 7) wvm(m, v); break; }
         case 0x83: { Modrm m; decode_modrm(m); uint32_t imm = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(fetch8()))) & vmask; uint32_t v = aluv(m.reg, rvm(m), imm); if (m.reg != 7) wvm(m, v); break; }
 

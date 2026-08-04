@@ -44,30 +44,30 @@ No output, no `.OBJ`.
 
     PATH=... COMSPEC=... DJGPP=... WATCOM=A:\ INCLUDE=A:\H $=A:\BINW\WCC386.EXE
 
-a variable literally named `$`, holding the path of the program to load. That is how
-W32RUN learns what it is loading; nothing on the command line or in the PSP carries it.
-It was found by dumping the environment block as the child receives it, after the
-disassembly at `0110:0686` showed the `EXEC` parameter block carries only `env=0`, the
-stub's own PSP command tail and its two FCBs.
+a variable literally named `$`, holding the path of the program to load. Nothing on the
+command line or in the PSP carries it — the disassembly at `0110:0686` shows the `EXEC`
+parameter block holds only `env=0`, the stub's own PSP command tail and its two FCBs.
 
-**And the stub writes it over the trailing program name.** Our environment block is
-sized exactly, with the count word and the program path immediately after the strings,
-so appending `$=…` lands on top of them — the block that reaches W32RUN has the `$`
-variable but no trailing name at all. Change the child's environment to a faithful copy
-(as it is now) and W32RUN opens `""`; leave it rebuilt with the child's own name and it
-opens `W32RUN.EXE`. Either way it is reading *the trailing name*, not `$`.
+**W32RUN loads itself, not the target.** Measured: after opening a file it always seeks
+to `0x451` and reads `0x4410` bytes — hard-coded offsets that belong to *its own*
+executable. Feeding it the parent's path (an experiment worth doing, since the trailing
+program name is the other thing it reads) made it read `wcc386.exe` at W32RUN's offsets
+and jump into the middle of data, which is how BOUND and the `0x82` alias turned up as
+"unimplemented instructions". So the trailing name must be the **child's own** path, and
+the `$` variable is the target.
 
-So the two facts are in tension and one of the assumptions is wrong. The next step is
-to settle which:
+Both of those now hold at once, which took some care: the stub appends `$=…` over the
+end-of-strings NUL, taking the count word and program name with it, so a faithful copy
+of the parent's block has `$` but no name, and a rebuilt block has a name but no `$`.
+`make_child_env()` copies the strings and *regenerates* the name, keeping both.
 
-- most likely, a real DOS environment block has **slack** — DOS allocates it in whole
-  paragraphs with room to grow, so appending a variable does not land on the program
-  name. Ours is packed to the byte. Giving the block real slack and re-testing is cheap
-  and would explain everything.
-- otherwise, W32RUN reads `$` and something about how we present it is wrong.
-
-Everything needed to tell them apart is already in place: `DOSEMU_DOS_TRACE=1` prints
-the child's environment strings as they are handed over, and the path of every open.
+**Where it stops now.** W32RUN loads its own 32-bit part, switches to protected mode,
+and the 32-bit code runs about **230 instructions** — `AH=35h` twice, `AH=30h` (DOS
+version), `AH=25h` on vector 11h — then exits 0 without opening `wcc386.exe`. Vector 11h
+is the BIOS equipment list, which is a strange thing for a loader to hook, so the first
+thing to check is whether that `AL` is meaningful or whether the code is already off the
+rails. `DOSEMU_TRACE=10196-10285` covers the whole run from the last DOS call to the
+exit; that is 90 instructions and should settle it.
 
 ## Fixed on the way here
 
@@ -128,3 +128,6 @@ Also: `PATH` gained `A:\BINW`, and the environment gained `WATCOM=A:\` and
   is loaded — except we would be doing the loading instead of the extender.
 - The 16-bit `wcc.exe` is the same LX shape, so there is no easier target among the
   Watcom tools.
+- `INS`/`OUTS` (`6Ch`-`6Fh`) are still unimplemented. They only turned up while the
+  loader was executing data, so they are not blocking anything — but they are real
+  80186 instructions and the CPU should have them.

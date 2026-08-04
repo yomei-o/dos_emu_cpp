@@ -58,7 +58,8 @@ bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string
 //         it walks here; leaving it zero sends it to segment 0.
 //   0x50  the classic `INT 21h; RETF` call gate, which some runtimes far-call instead
 //         of issuing INT 21h themselves.
-void Dos::init_psp(uint16_t psp, uint16_t parent) {
+void Dos::init_psp(uint16_t psp, uint16_t parent, const std::string& path) {
+    prog_path = path;
     env_seg = mem_.rw(psp, 0x2C);   // still a segment now; the DPMI switch may rewrite it
     mem_.ww(psp, 0x02, heap_end_);
     mem_.ww(psp, 0x16, parent);
@@ -73,7 +74,7 @@ void Dos::init_psp(uint16_t psp, uint16_t parent) {
 // looks back — but a loader stub EXECs a helper and expects to still be findable, and
 // the shared block meant loading the helper *overwrote the parent's own program name*
 // with the helper's. DOS gives every program its own block; so do we now.
-uint16_t Dos::make_child_env(uint16_t parent_env, const std::string&) {
+uint16_t Dos::make_child_env(uint16_t parent_env, const std::string& parent_path) {
     // Copied *verbatim*, trailing program name included — the child does NOT get its
     // own name here. That is the DOS behaviour, and it is deliberate on the guest's
     // side too: the name after the strings is appended by whoever built the block (the
@@ -94,13 +95,17 @@ uint16_t Dos::make_child_env(uint16_t parent_env, const std::string&) {
     }
     b.push_back(0);                                 // end of strings
     const uint16_t after = static_cast<uint16_t>(b.size());
-    const uint16_t count = mem_.rw(parent_env, after);
-    b.push_back(static_cast<uint8_t>(count)); b.push_back(static_cast<uint8_t>(count >> 8));
-    for (uint16_t i = 0; count && i < 256; ++i) {   // the parent's program name
-        const uint8_t c = mem_.rb(parent_env, static_cast<uint16_t>(after + 2 + i));
-        b.push_back(c);
-        if (!c) break;
-    }
+    // The trailing name is the child's own path, regenerated rather than copied. It has
+    // to be regenerated: a program that appends a variable to its environment writes
+    // over the end-of-strings NUL, and the count word and name that followed go with
+    // it. Watcom's stub does exactly that, adding `$=<its own path>`, so by the time
+    // the block reaches the child there is no name left to copy -- while the `$`
+    // variable, which is how the loader learns what to load, must survive. Copying the
+    // strings and rebuilding the name is what keeps both.
+    const uint16_t count = 1;
+    b.push_back(1); b.push_back(0);
+    for (char c : parent_path) b.push_back(static_cast<uint8_t>(c));
+    b.push_back(0);
 
     if (trace) {
         std::fprintf(stderr, "[env] child env %u bytes, trailing name \"", (unsigned)b.size());
@@ -151,6 +156,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     // the parent running with the child's addressing.
     const Cpu::State parent = cpu_.save();
     uint16_t spsp = psp_seg, sheap = heap_next_, senv = env_seg;
+    const std::string sname = prog_path;
 
     uint16_t child_psp = heap_next_;
     heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
@@ -163,10 +169,10 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
 
     std::string err;
     if (!load_program(file, cpu_, child_psp, tail, err, name, child_env)) {
-        cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap; env_seg = senv;
+        cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap; env_seg = senv; prog_path = sname;
         cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
     }
-    init_psp(child_psp, spsp);        // the child's parent is us
+    init_psp(child_psp, spsp, name);  // the child's parent is us
     psp_seg = child_psp;
 
     // Run the child to completion.
@@ -178,7 +184,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     child_exited_ = saved_exited;
 
     // Restore the parent and hand it the child's exit code (via AH=4Dh).
-    cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap; env_seg = senv;
+    cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap; env_seg = senv; prog_path = sname;
     last_child_code_ = code;
     cpu_.flags &= ~CF; cpu_.r[AX] = 0;
     return true;
