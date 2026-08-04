@@ -11,8 +11,25 @@ Dpmi::Dpmi(Cpu& cpu, Memory& mem) : cpu_(cpu), mem_(mem) {
     // executing anything, but put a far RET there so a stray call still returns
     // instead of running whatever happens to be in memory.
     mem_.wb(kEntrySeg, 0, 0xCB);
-    cpu_.pm_switch_addr = Memory::phys(kEntrySeg, 0);
-    cpu_.on_pm_switch = [this] { switch_to_pm(); };
+    // 0305h's save/restore-state procedures are far RETs and nothing more, because there
+    // is no host state to preserve across a mode switch here: the switch keeps the whole
+    // CPU. We say so in AX (a size of zero means "you need not call these"), but a client
+    // is entitled to call them anyway, so they have to be real code.
+    mem_.wb(kEntrySeg, kOffSaveRm, 0xCB);
+    mem_.wb(kEntrySeg, kOffSavePm, 0xCB);
+    cpu_.hook_lo = Memory::phys(kEntrySeg, 0);
+    for (int i = 0; i < kCallbacks; ++i) mem_.wb(kEntrySeg, kOffCbBase + i, 0xCB);
+    cpu_.hook_hi = Memory::phys(kEntrySeg, kOffCbBase + kCallbacks);
+    cpu_.on_hook = [this](uint32_t off) {
+        if (off == 0)             { switch_to_pm();    return true; }
+        if (off == kOffRawToPm)   { raw_switch(true);  return true; }
+        if (off == kOffRawToRm)   { raw_switch(false); return true; }
+        if (off == kOffCbRet)     { cb_return();       return true; }
+        if (off >= kOffCbBase && off < kOffCbBase + kCallbacks) {
+            call_back(static_cast<int>(off - kOffCbBase)); return true;
+        }
+        return false;
+    };
 
     cpu_.ldt_base = kLdtBase;
     for (int i = 0; i < 8; ++i) mem_.w8(kLdtBase + i, 0);   // null descriptor
@@ -147,6 +164,132 @@ void Dpmi::switch_to_pm() {
 // unmodified — no second, protected-mode-aware copy of the DOS layer. The frame's
 // segments are real-mode paragraphs by definition, which is exactly what it wants.
 //
+// A selector covering the entry paragraph, so the protected-mode halves of 0305h/0306h
+// have an address a client can far-jump to. 32-bit, because the client that wants raw
+// mode switching is a 32-bit one and its far RET out of the save-state stub has to pop
+// the same width its far CALL pushed.
+uint16_t Dpmi::entry_sel() {
+    if (!entry_sel_) {
+        entry_sel_ = alloc_sel();
+        set_desc(entry_sel_, Memory::phys(kEntrySeg, 0), 0xFFFF, true, true);
+    }
+    return entry_sel_;
+}
+
+// A selector over the whole first megabyte. A callback hands the client a pointer to the
+// real-mode stack, which needs a descriptor that can address a paragraph.
+uint16_t Dpmi::low_sel() {
+    if (!low_sel_) { low_sel_ = alloc_sel(); set_desc(low_sel_, 0, 0xFFFFF, false, true); }
+    return low_sel_;
+}
+
+// The stack a callback's procedure runs on. The client does not supply one — the host is
+// required to — and it cannot be the real-mode stack that was current when the callback
+// fired, which may be 64 bytes of BIOS scratch.
+void Dpmi::cb_stack(uint16_t& sel, uint32_t& sp) {
+    if (!cb_ss_) {
+        const uint32_t base = alloc_mem(0x2000);
+        cb_ss_ = alloc_sel();
+        set_desc(cb_ss_, base, 0x1FFF, false, true);
+        cb_sp_ = 0x2000;
+    }
+    sel = cb_ss_; sp = cb_sp_;
+}
+
+// A real-mode callback fired: real-mode code far-called the address 0303h handed out.
+// Lay the real-mode machine state into the structure the client nominated, switch to
+// protected mode, and enter its procedure — with DS:ESI pointing at the real-mode stack
+// and ES:EDI at that structure, which is the whole interface. The procedure ends with
+// IRETD, so the frame we push under it returns to kOffCbRet and cb_return() takes the
+// machine back to real mode using whatever CS:IP the client left in the structure.
+//
+// Everything a client uses this for is a real-mode event it wants to handle in protected
+// mode: DJGPP registers one to hook the FPU emulator (which is why every DJGPP program
+// prints `Coprocessor not present and DPMI setup failed!` -- this was the missing half),
+// and DOS/4GW will not start without them.
+void Dpmi::call_back(int slot) {
+    const Callback& cb = cb_[slot];
+    if (!cb.used) { cpu_.jump(cpu_.ip); return; }        // freed under us; do nothing
+    const uint32_t f = cpu_.read_desc(cb.str_sel).base + cb.str_off;
+
+    mem_.w32(f + 0x00, cpu_.gd(DI)); mem_.w32(f + 0x04, cpu_.gd(SI));
+    mem_.w32(f + 0x08, cpu_.gd(BP)); mem_.w32(f + 0x10, cpu_.gd(BX));
+    mem_.w32(f + 0x14, cpu_.gd(DX)); mem_.w32(f + 0x18, cpu_.gd(CX));
+    mem_.w32(f + 0x1C, cpu_.gd(AX));
+    mem_.w16(f + 0x20, cpu_.flags);
+    mem_.w16(f + 0x22, cpu_.sreg[ES]); mem_.w16(f + 0x24, cpu_.sreg[DS]);
+    mem_.w16(f + 0x26, cpu_.sreg[FS]); mem_.w16(f + 0x28, cpu_.sreg[GS]);
+    mem_.w16(f + 0x2C, 0); mem_.w16(f + 0x2A, 0);        // CS:IP -- the client fills these
+    mem_.w16(f + 0x30, cpu_.sreg[SS]); mem_.w16(f + 0x2E, cpu_.r[SP]);
+
+    const uint32_t rm_stack = static_cast<uint32_t>(cpu_.sreg[SS]) * 16 + cpu_.r[SP];
+    if (trace)
+        printf("[dpmi] callback %d -> %04X:%08X, real stack %04X:%04X\n",
+               slot, cb.proc_sel, cb.proc_off, cpu_.sreg[SS], cpu_.r[SP]);
+
+    uint16_t ss; uint32_t sp;
+    cb_stack(ss, sp);
+    cpu_.cr[0] |= 1u;                                    // protected mode
+    cpu_.set_seg(DS, low_sel());   cpu_.sd(SI, rm_stack);
+    cpu_.set_seg(ES, cb.str_sel);  cpu_.sd(DI, cb.str_off);
+    cpu_.set_seg(SS, ss);          cpu_.sp_set(sp);
+    cpu_.push32(cpu_.flags);                             // the frame its IRETD unwinds
+    cpu_.push32(entry_sel());
+    cpu_.push32(kOffCbRet);
+    cpu_.set_seg(CS, cb.proc_sel);
+    cpu_.jump(cb.proc_off);
+}
+
+// The client's callback procedure has IRETD'd. Back to real mode, with the register
+// state it left in the structure — including the CS:IP it wants execution to resume at,
+// which for a callback invoked by a far CALL is the return address it popped itself.
+void Dpmi::cb_return() {
+    const uint32_t f = cpu_.read_desc(cpu_.sreg[ES]).base + cpu_.gd(DI);
+    cpu_.cr[0] &= ~1u;
+    cpu_.ip_mask = 0xFFFFu; cpu_.cs_d = cpu_.ss_d = false;
+
+    cpu_.sd(DI, mem_.r32(f + 0x00)); cpu_.sd(SI, mem_.r32(f + 0x04));
+    cpu_.sd(BP, mem_.r32(f + 0x08)); cpu_.sd(BX, mem_.r32(f + 0x10));
+    cpu_.sd(DX, mem_.r32(f + 0x14)); cpu_.sd(CX, mem_.r32(f + 0x18));
+    cpu_.sd(AX, mem_.r32(f + 0x1C));
+    cpu_.flags = mem_.r16(f + 0x20);
+    cpu_.set_seg(ES, mem_.r16(f + 0x22)); cpu_.set_seg(DS, mem_.r16(f + 0x24));
+    cpu_.set_seg(FS, mem_.r16(f + 0x26)); cpu_.set_seg(GS, mem_.r16(f + 0x28));
+    cpu_.set_seg(SS, mem_.r16(f + 0x30)); cpu_.r[SP] = mem_.r16(f + 0x2E);
+    cpu_.set_seg(CS, mem_.r16(f + 0x2C));
+    cpu_.jump(mem_.r16(f + 0x2A));
+    if (trace) printf("[dpmi] callback returns to %04X:%04X\n", cpu_.sreg[CS], cpu_.r[SP]);
+}
+
+// The raw mode switches of INT 31h 0306h. Entered by a far JMP -- not a call, there is no
+// return address -- with the whole new machine state in registers:
+//
+//     AX = new DS   CX = new ES   DX = new SS   (E)BX = new (E)SP
+//     SI = new CS   (E)DI = new (E)IP          BP preserved, FS/GS zero afterwards
+//
+// A client uses these when it wants to own the switch rather than be handed a mode:
+// DOS/4GW does, and will not start without them. Everything else about the CPU carries
+// across untouched, which is what makes 0305h's "no state to save" answer true.
+void Dpmi::raw_switch(bool to_pm) {
+    const uint16_t nds = cpu_.r[AX], nes = cpu_.r[CX], nss = cpu_.r[DX], ncs = cpu_.r[SI];
+    const uint32_t nsp = cpu_.gd(BX), nip = cpu_.gd(DI);
+    if (trace)
+        printf("[dpmi] raw switch to %s: cs=%04X ip=%08X ds=%04X es=%04X ss=%04X sp=%08X\n",
+               to_pm ? "pm" : "real", ncs, nip, nds, nes, nss, nsp);
+    if (to_pm) cpu_.cr[0] |= 1u; else cpu_.cr[0] &= ~1u;
+    // Order matters twice over: SS before the stack pointer, because whether ESP is 16-
+    // or 32-bit comes from the SS descriptor's B bit; and CS before the jump, because
+    // whether EIP wraps at 64 KiB comes from the CS descriptor's D bit.
+    cpu_.set_seg(DS, nds);
+    cpu_.set_seg(ES, nes);
+    cpu_.sreg[FS] = 0; cpu_.sbase[FS] = 0;
+    cpu_.sreg[GS] = 0; cpu_.sbase[GS] = 0;
+    cpu_.set_seg(SS, nss);
+    cpu_.sp_set(nsp);
+    cpu_.set_seg(CS, ncs);
+    cpu_.jump(nip);
+}
+
 // The client's own protected-mode state is saved and restored around the call; only
 // the frame is written back.
 void Dpmi::simulate_real_int() {
@@ -368,6 +511,31 @@ bool Dpmi::int31() {
         case 0x0902: cpu_.sb(AX, cpu_.get_flag(IF) ? 1 : 0); ok(); break;   // get state
 
         case 0x0300: simulate_real_int(); break;         // simulate real-mode interrupt
+        case 0x0303: {                                   // allocate real-mode callback
+            int i = 0;
+            while (i < kCallbacks && cb_[i].used) ++i;
+            if (i == kCallbacks) { fail(0x8015); break; }
+            cb_[i] = {cpu_.sreg[DS], cpu_.gd(SI), cpu_.sreg[ES], cpu_.gd(DI), true};
+            cpu_.r[CX] = kEntrySeg; cpu_.r[DX] = static_cast<uint16_t>(kOffCbBase + i);
+            ok(); break;
+        }
+        case 0x0304: {                                   // free real-mode callback (CX:DX)
+            const int i = static_cast<int>(cpu_.r[DX]) - kOffCbBase;
+            if (cpu_.r[CX] != kEntrySeg || i < 0 || i >= kCallbacks) { fail(0x8024); break; }
+            cb_[i].used = false; ok(); break;
+        }
+        case 0x0305:                                     // get save-state addresses
+            // Size zero: there is no host state a client has to preserve across a raw
+            // mode switch, because the switch preserves the whole CPU. The procedures
+            // still exist and still return properly, for a client that calls them anyway.
+            cpu_.r[AX] = 0;
+            cpu_.r[BX] = kEntrySeg; cpu_.r[CX] = kOffSaveRm;
+            cpu_.r[SI] = entry_sel(); cpu_.sd(DI, kOffSavePm);
+            ok(); break;
+        case 0x0306:                                     // get raw mode-switch addresses
+            cpu_.r[BX] = kEntrySeg; cpu_.r[CX] = kOffRawToPm;
+            cpu_.r[SI] = entry_sel(); cpu_.sd(DI, kOffRawToRm);
+            ok(); break;
         case 0x0400:                                     // get DPMI version
             cpu_.r[AX] = 0x005A;                         // 0.90
             cpu_.r[BX] = 0x0005;                         // no V86, no virtual memory

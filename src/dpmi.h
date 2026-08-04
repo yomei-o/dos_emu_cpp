@@ -54,10 +54,26 @@ private:
     Cpu& cpu_;
     Memory& mem_;
 
-    // Where the client far-calls to enter protected mode. A real-mode paragraph that
-    // nothing else uses: the IVT and BIOS data end at 0x0500, the environment block
-    // the loader builds sits at 0x00F0, and programs load from 0x0100 upward.
-    static constexpr uint16_t kEntrySeg = 0x00E0;
+    // Where the client far-calls to enter protected mode, and the other entry points we
+    // hand out. A real-mode paragraph nothing else uses: the IVT stubs end at 0x008F,
+    // the environment block is allocated out of the arena above, and programs load from
+    // 0x0100 upward. Seven paragraphs are reserved for this and the list-of-lists.
+    //
+    //   +0x00  mode-switch entry (INT 2Fh/1687h)
+    //   +0x10  raw real -> protected mode switch      (0306h)
+    //   +0x20  raw protected -> real mode switch      (0306h)
+    //   +0x30  save/restore state, real mode          (0305h) -- a bare far RET
+    //   +0x40  save/restore state, protected mode     (0305h) -- ditto
+    //   +0x50  where a callback's IRETD lands, to come back to real mode
+    //   +0x60  32 real-mode callback addresses, one byte apart (0303h)
+    static constexpr uint16_t kEntrySeg   = 0x00E0;
+    static constexpr uint16_t kOffRawToPm = 0x10;
+    static constexpr uint16_t kOffRawToRm = 0x20;
+    static constexpr uint16_t kOffSaveRm  = 0x30;
+    static constexpr uint16_t kOffSavePm  = 0x40;
+    static constexpr uint16_t kOffCbRet   = 0x50;
+    static constexpr uint16_t kOffCbBase  = 0x60;
+    static constexpr int      kCallbacks  = 32;
 
     // Our LDT, in extended memory just above the 1 MiB real-mode window.
     static constexpr uint32_t kLdtBase  = 0x00110000;
@@ -86,8 +102,27 @@ private:
     struct Handler { uint16_t sel = 0; uint32_t off = 0; };
     Handler exc_[32], pmint_[256];
 
+    // A real-mode callback (0303h): a real-mode address that, when called, runs a
+    // protected-mode procedure of the client's with the real-mode register state laid out
+    // in a structure it nominated.
+    struct Callback {
+        uint16_t proc_sel = 0; uint32_t proc_off = 0;    // the client's procedure
+        uint16_t str_sel = 0;  uint32_t str_off = 0;     // its register structure
+        bool used = false;
+    };
+    Callback cb_[kCallbacks];
+    uint16_t low_sel_ = 0, cb_ss_ = 0;
+    uint32_t cb_sp_ = 0;
+    uint16_t low_sel();              // base 0, the whole first megabyte
+    void cb_stack(uint16_t& sel, uint32_t& sp);   // a stack for a callback to run on
+    void call_back(int slot);
+    void cb_return();
+
     void switch_to_pm();
+    void raw_switch(bool to_pm);
     void simulate_real_int();
+    uint16_t entry_sel();            // a selector over kEntrySeg, for the PM entry points
+    uint16_t entry_sel_ = 0;
     uint16_t scratch_stack_seg();
     // Allocate `count` consecutive LDT descriptors; returns the first selector.
     uint16_t alloc_sel(int count = 1);

@@ -9,10 +9,10 @@
 
 namespace dosemu {
 
-// A spare paragraph used to hand out the DOS list-of-lists, just above the DPMI entry
-// (0x00E0) and above the environment block (0x0090). 0x00FF is the arena's first MCB and
-// 0x0100 the first PSP, so this is the last free paragraph below the programs.
-static constexpr uint16_t kLolSeg = 0x00E1;
+// Where the DOS list-of-lists is handed out: just above the DPMI host's entry points,
+// which own 0x00E0 through 0x00E7. Both are inside the memory arena and marked as DOS's
+// own, so nothing allocates over them.
+static constexpr uint16_t kLolSeg = 0x00E8;
 
 bool Dos::trace = getenv("DOSEMU_DOS_TRACE") != nullptr;
 
@@ -504,7 +504,36 @@ void Dos::write_dta_entry() {
     mem_.wb(s, o + 30 + nm.size(), 0);
 }
 
+// A protected-mode client is entitled to issue INT 21h directly and have the host reflect
+// it — that is in the DPMI spec, and DOS/4GW does it for everything. Our DOS layer reads
+// its arguments as segment:offset, so a selector in DS or ES addresses a paragraph 16
+// times too low: DOS/4GW's error message came out as two bytes of noise, which is the
+// worst possible outcome, because the message was the thing that would have said what was
+// wrong.
+//
+// So translate, for the duration of the call, the selectors the layer is about to read
+// into the paragraphs they alias. A host can only do this for conventional memory —
+// a base above 1 MiB has no paragraph — and that is not a limitation we invented: a
+// client wanting DOS to read its buffer has to put the buffer where DOS can reach it.
+struct SegAlias {
+    Cpu& cpu; int idx; uint16_t sel; bool swapped = false;
+    SegAlias(Cpu& c, int i) : cpu(c), idx(i), sel(c.sreg[i]) {
+        if (!cpu.pe()) return;
+        const uint32_t base = cpu.sbase[idx];
+        if (base >= 0x100000 || (base & 0xF)) return;
+        cpu.sreg[idx] = static_cast<uint16_t>(base >> 4);
+        swapped = true;
+    }
+    ~SegAlias() {
+        // Only put the selector back if the handler did not deliberately set this
+        // register itself (AH=35h and AH=52h both return through ES).
+        if (swapped && cpu.sreg[idx] == static_cast<uint16_t>(cpu.sbase[idx] >> 4))
+            cpu.sreg[idx] = sel;
+    }
+};
+
 bool Dos::handle(uint8_t n) {
+    SegAlias ads(cpu_, DS), aes(cpu_, ES);
     switch (n) {
         // A CPU exception, not a service call. Nothing here can handle one, but
         // silently returning would leave the guest running on the garbage that caused

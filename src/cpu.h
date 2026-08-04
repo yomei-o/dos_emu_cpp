@@ -187,10 +187,14 @@ public:
     // INT n service: the handler inspects/updates registers. Return false to let
     // the CPU fall through to the (usually unused) real IVT behaviour.
     std::function<bool(uint8_t)> on_int;
-    // The DPMI mode-switch entry: when execution reaches this linear address, the
-    // host performs the real→protected switch instead of executing an instruction.
-    std::function<void()> on_pm_switch;
-    uint32_t pm_switch_addr = 0xFFFFFFFFu;
+    // Linear addresses the DPMI host owns: reaching one runs a host routine instead of
+    // executing an instruction. One address was enough while the only such thing was the
+    // mode-switch entry; INT 31h 0306h hands the client two more procedures (raw real→
+    // protected and protected→real), so it is a range now, and the handler dispatches on
+    // the offset. It returns false for an offset it does not claim, so ordinary code in
+    // the same paragraph still executes.
+    std::function<bool(uint32_t off)> on_hook;
+    uint32_t hook_lo = 0, hook_hi = 0;
 
     // Everything an interruption has to preserve: the register file plus the mode and
     // descriptor-cache state that says how those registers are interpreted. Saving the

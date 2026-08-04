@@ -57,8 +57,13 @@ void Cpu::bad_sel(int i, uint16_t sel) const {
     static int n = 0;
     if (++n > 8) return;
     static const char* nm[] = {"ES","CS","SS","DS","FS","GS"};
-    printf("[gp] loaded %s with %s selector %04X at %04X:%08X (a real CPU faults here)\n",
-           nm[i], sel ? "a not-present" : "the null", sel, sreg[CS], ip);
+    // Which table it came out of, and where that table is: a selector that is "not
+    // present" because the descriptor is genuinely marked absent and one that reads as
+    // absent because we looked in the wrong table are completely different bugs.
+    printf("[gp] loaded %s with %s selector %04X (%s, gdt=%08X ldt=%08X) at %04X:%08X"
+           " (a real CPU faults here)\n",
+           nm[i], sel ? "a not-present" : "the null", sel, (sel & 4) ? "LDT" : "GDT",
+           gdt_base, ldt_base, sreg[CS], ip);
 }
 
 // Port I/O. Only the A20 gate is modelled; everything else reads as zero and ignores
@@ -190,8 +195,11 @@ void Cpu::step() {
     ++insns;
     if (max_insns && insns > max_insns)
         throw CpuError{"instruction limit exceeded (runaway program?)", sreg[CS], static_cast<uint16_t>(ip)};
-    // The DPMI mode-switch entry: reaching it runs the host switch, not an instruction.
-    if (pm_switch_addr != 0xFFFFFFFFu && on_pm_switch && lin(CS, ip) == pm_switch_addr) { on_pm_switch(); return; }
+    // The DPMI host's own entry points: reaching one runs the host, not an instruction.
+    if (hook_hi) {
+        const uint32_t a = lin(CS, ip);
+        if (a >= hook_lo && a < hook_hi && on_hook(a - hook_lo)) return;
+    }
     if (sample_every && !sample_left--) {
         sample_left = sample_every;
         printf("[sample] %04X:%08X after %llu\n", sreg[CS], ip, (unsigned long long)insns);
@@ -785,6 +793,17 @@ void Cpu::step() {
 
         // 0x0F two-byte opcodes (80386+)
         case 0x0F: do_0f(); break;
+
+        // XLAT: AL indexes a table at DS:(E)BX. An 8086 instruction that no guest here
+        // had used until DOS/4GW, which needs it before it will print its own error
+        // message — so the first symptom was an unimplemented opcode standing where the
+        // explanation should have been.
+        case 0xD7: {
+            const uint32_t b = d.a32 ? gd(BX) : r[BX];
+            const int s = d.have_ovr ? d.seg_ovr_idx : DS;
+            sb(AX, mem_.r8(lin(s, b + (r[AX] & 0xFF))));
+            break;
+        }
 
         // x87 FPU escape opcodes (D8-DF). The FPU is not modelled; LSI C's small
         // model does floating point in software and only touches the FPU to probe

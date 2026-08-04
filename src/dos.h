@@ -27,7 +27,7 @@ public:
         // The DPMI mode-switch entry and the list-of-lists are inside the arena and are
         // not free. Marked as DOS's own (owner 8, the convention), so nothing hands them
         // out and a guest walking the chain sees them for what they are.
-        mem_own(kDpmiEntrySeg, 2);
+        mem_own(kDpmiEntrySeg, 10);
         for (Block& b : blocks_) if (b.seg + 1 == kDpmiEntrySeg) b.owner = 8;
         mem_publish();
         dpmi_.alloc_dos = [this](uint16_t paras) { return mem_alloc(paras); };
@@ -106,7 +106,7 @@ private:
     // The arena starts just above the IVT stubs (which end at 0x008F) rather than one
     // paragraph under the first PSP, because the environment block has to be inside it.
     static constexpr uint16_t kArenaMcb = 0x0090;
-    static constexpr uint16_t kDpmiEntrySeg = 0x00E0;   // ...and the list-of-lists at E1
+    static constexpr uint16_t kDpmiEntrySeg = 0x00E0;   // ...through E7, then the LoL at E8
     uint16_t heap_end_ = 0x9F00;                   // just below the video/BIOS area (~640 KiB)
 
     void     mem_split(uint16_t mcb, uint16_t paras);  // carve `paras` off the front
