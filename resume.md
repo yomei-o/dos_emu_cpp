@@ -7,6 +7,21 @@ Working notes for picking the project back up. The README says what the emulator
 > now). Protected mode and the DPMI host are in and regression-green: DJGPP compiles C
 > and C++, and so do the three Watcom compilers.
 >
+> **HANDOFF (next session starts here).** Everything below is on `main` and green;
+> `wip-mcb-chain` is merged and deleted. The one live thread is the Watcom linker, and it
+> is down to a single diagnosed bug with the fix sketched and one failed attempt written
+> up — jump to **"PICK UP HERE"** in the OpenWatcom section. Reproduce with:
+>
+>     sh get_fixtures.sh ow && sh build.sh
+>     ./dosemu --root ow ow/binw/wcc386.exe hello.c                                  # works
+>     ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe" # banner, then derails
+>
+> Regression before committing anything: `./dosemu --root scratch_root
+> scratch_root/LSIC86/BIN/LCC.EXE PROG.C` then `PROG.exe` (sum=55), `COMMAND.COM /C "lcc
+> prog.c"`, `fp.exe` (H10=2.928968 sqrt2=1.414214 sin1=0.841471), the three Watcom
+> compilers, and — after `EMCC=<path> sh web/build.sh` — all four of `web/test_shell.mjs`,
+> `test_node.mjs`, `test_bundle.mjs`, `test_djgpp.mjs`.
+>
 > **What to pick up.** Nothing is broken, so this is a choice rather than a queue:
 >
 > 1. **The x87 now computes correctly** through libm and `printf("%f")` — verified by
@@ -399,14 +414,104 @@ loader → `wcl hello.c` (OpenWatcom parity with the LSI C demo); then scale tow
 FreeCOM's full `wmake` build. Keep LSI C + FreeCOM green throughout (`node
 web/test_shell.mjs`, native `LCC.EXE PROG.C`).
 
-## ⏳ OpenWatcom — the extender runs, the image does not load yet
+## ⏳ OpenWatcom — compilers work, DOS/4GW starts, the linker does not finish
 
-Written up in **OPENWATCOM.md**: how to assemble the toolchain from the 5 MB component
-zips, that wcc386 is MZ + LX driven by W32RUN (a DPMI client, same shape as go32), how
-far it gets, and the four emulator bugs fixed on the way — a dishonest AH=4Ah, an
-empty interrupt vector table, a missing A20 gate, and a refused AH=63h. New
-diagnostic: **DOSEMU_DOS_TRACE=1** logs every INT 21h call and its answer, which the
-DPMI trace cannot show because a real-mode stub does its DOS work directly.
+**OPENWATCOM.md is the full account** and is current. Short version: `wcc386`, `wcc` and
+`wpp386` compile C and C++ to `.obj` inside the emulator (`sh get_fixtures.sh ow`, then
+`./dosemu --root ow ow/binw/wcc386.exe hello.c`). `wlink` is stubbed for DOS/4GW; DOS/4GW
+now starts, prints its own banner, loads the 32-bit image and runs it for a quarter of a
+million instructions before going off the rails.
+
+### PICK UP HERE — one bug, diagnosed, with the fix sketched and a warning
+
+The failure is exact and reproducible:
+
+    ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe"
+
+    DOS/4GW Protected Mode Run-time  Version 1.97
+    Copyright (c) Rational Systems, Inc. 1990-1994
+    [cpu] exception INT 03h at 0000:000000CD (unhandled)
+    dosemu: unimplemented instruction (opcode 0x27) at 0237:0083  [252970 instructions]
+
+At instruction 251,479 the application issues `INT 31h AX=0302h`. DOS/4GW's own
+protected-mode handler takes it (we dispatch there — `[dpmi] pm int 31 ax=0302 -> client
+0157:000000C4`), does its translation, and **chains to the host's default handler**, which
+is one of the 256 one-byte stubs in the entry paragraph. That lands in
+`Dpmi::pm_int_default()`, which does:
+
+    in_default_ = true;  real_int(n);  in_default_ = false;      // service the interrupt
+    pop EIP / CS / EFLAGS from the client's stack; set CS:IP     // then emulate the IRET
+
+and `real_int(n)` for 0302h reaches `Dpmi::rm_call()`, which **transfers control**: it
+drops the machine to real mode, points CS:IP at the real-mode procedure and returns,
+expecting the guest to run next. The unwind afterwards then pops three dwords off the
+*real-mode* stack and jumps to what it finds — `CS = 0, EIP = 0x51`, and 0x51 is
+`kOffRmRet`, the return offset `rm_call` had just pushed. Everything after that is a guest
+executing the interrupt vector table. You can watch the moment at 251,694:
+
+    DOSEMU_TRACE=251660-251705 ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe"
+    [t]251694 0157:0000094E 1F ...        pop ds
+    [t]251695 0157:00000950 CF ...        iretd   -> 0000:00000051
+
+**This is the third instance of one mistake**, so it is worth naming as a rule: *a host
+routine that transfers control must not have its caller unwind afterwards.* The first was
+`SegAlias` restoring a segment register after 0302h had loaded it for real mode (fixed by
+not aliasing INT 31h at all). The second is this one. Anything else that calls into
+`int31()` and then adjusts machine state is suspect.
+
+**The obvious fix does not work as written.** Reordering `pm_int_default` to unwind first
+and service second is more truthful — a service acts on the client's context and returns to
+it — and it compiles and keeps every regression green, but the linker then *hangs* instead
+of derailing (fewer than 20 M instructions in 45 s, so it is stuck in host code or in a
+tight loop involving it). It is reverted; `git log` has it in the message of the ARPL
+commit only, not in the tree. Diagnose the hang before adopting the reorder: the likely
+issue is that `rm_call`'s snapshot then captures the client's context, so `rm_return`
+restores the client rather than the stub, and something re-enters.
+
+The alternative shape, probably better: give `rm_call()` a way to say "I transferred
+control" (a flag on `Dpmi`), have `pm_int_default()` skip its unwind when it is set, and
+have `rm_return()` perform the unwind that `pm_int_default()` would have done. That keeps
+each routine responsible for the state it created.
+
+### What was fixed getting here (all on `main`, all regression-green)
+
+In the order they were found, because each one uncovered the next:
+
+1. **Memory is paged** — X-32 works at linear 256 MiB and a 64 MiB flat array folded every
+   address back through the size mask.
+2. **A guest that loads its own IDT gets its own handler** — X-32 is not a DPMI client and
+   reflects DOS calls itself.
+3. **Privilege-changing interrupt gates** — X-32 runs the application at CPL 3, so the gate
+   switches to the ring-0 stack out of the TSS and the far return pops it back.
+4. **`POP` computes its address after the pop** — X-32's handler rewrites its own interrupt
+   frame with `pop dword [esp+8]`.
+5. **An environment block belongs below the program**, and **conventional memory is a block
+   list with a real MCB chain** — an extender sizes itself by asking for everything and
+   releasing what it does not need, and it walks the chain off `AH=52h` to plan.
+6. **DPMI 0303h/0304h (real-mode callbacks), 0305h, 0306h, 0301h/0302h** — 0303h is also
+   why every DJGPP program used to apologise about the FPU; that warning is gone.
+7. **Protected-mode interrupts reach the handler that hooked them**, with the frame width
+   taken from the *client's* declared bitness and a real default handler for 0204h to name.
+8. **`LAR` does not report the present bit** — an empty descriptor slot is accessible with
+   access rights zero, which is how a program finds a free one.
+9. **`INT 16h AH=01h` stopped claiming a key was waiting**, which had sent DOS/4GW into a
+   blocking read with no output at all.
+10. **`XLAT`, `INS`/`OUTS`, `ARPL`** implemented; **DPMI selectors are RPL 3** because the
+    descriptors always said DPL 3 and a client reads its own CPL off CS.
+
+### Tooling notes worth keeping
+
+- **`DOSEMU_WATCH` now covers `Memory` writes** (tagged `[write]`), not just accesses
+  through a segment register. It used to be blind to the entire DOS layer and to the host's
+  own writes, and its *silence* read as evidence — two hours went into a conclusion drawn
+  from exactly that.
+- **A REP that copies more than 16 MiB reports itself.** A whole REP runs inside one
+  `step()`, so a runaway count is invisible: the emulator looks wedged while the sample
+  trace insists it is executing normally.
+- The trace that settled the hardest question was one line at the entry to
+  `Cpu::interrupt`, printing `ds=%04X(%08X)` — selector *and* cached base. A register
+  disagreeing with its own cache narrows the suspects to code that writes one without the
+  other.
 
 ## Practical notes
 
