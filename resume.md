@@ -60,11 +60,11 @@ all the way through their real-mode setup and stop exactly at the DPMI check —
 DJGPP prints `no DPMI - Get csdpmi*b.zip`, DOS/4GW prints `Can't run DOS/4G(W)`.
 The old `0x66` fault is gone. So the CPU is ready; what's missing is the mode switch.
 
-### IN PROGRESS — protected mode + DPMI (branch `wip-pmode-dpmi`, has a regression)
+### DONE — protected-mode groundwork (branch `wip-pmode-dpmi`, regression fixed)
 
-The protected-mode CPU groundwork is written but **breaks the LSI C regression** and
-is parked on branch `wip-pmode-dpmi` (main stays green at the 386-core commit). Pick
-up here. What the branch changes (src/cpu.h, src/cpu.cpp, src/memory.h only):
+The protected-mode CPU groundwork is in and the LSI C regression that parked it is
+**fixed** (see below). All three headless tests and the native compile-and-run pass.
+What the branch changes (src/cpu.h, src/cpu.cpp, src/memory.h only):
 
 - **Memory → 16 MiB** (`memory.h`): `kSize=0x1000000`, `kMask`; low 1 MiB is real
   mode, above is extended (protected-mode linear). `phys()` still masks real mode to
@@ -79,34 +79,43 @@ up here. What the branch changes (src/cpu.h, src/cpu.cpp, src/memory.h only):
   all segment loads/far transfers go through `set_seg`; string ops/moffs are
   address-size aware; effective `o32/a32 = prefix ^ cs_d`.
 
-**The regression (must fix before continuing):** native `LCC.EXE PROG.C` fails with
-`cg: can't open: 2.$$$`. Root cause traced precisely:
-- The pass chain is CPP → CF → CG86 (all EXEC'd, **all load at CS=0x3010**, one at a
-  time — so a naive "CS==0x3010" trace catches CPP, which *works*; you must gate the
-  trace on CF specifically).
-- CPP runs fine (writes `1.$$$`). **CF runs ~640 instructions then crashes**: a
-  `E8` near-CALL at `3010:0321` jumps to `3010:9708`, which is **all zeros** in this
-  build but holds code in the working (386-core) build. CF then marches through zero
-  memory and dies. So somewhere in CF's first 640 instructions the refactor either
-  (a) mis-addresses a memory *write* that zeroes code at CS:0x9708, or (b) takes a
-  wrong branch (bad flags) reaching a corrupt `E8`. CPP's first 300 instructions are
-  byte-identical old-vs-new, so it's subtle and CF-specific.
+**The regression, and what it actually was.** Symptom: native `LCC.EXE PROG.C` failed
+with `cg: can't open: 2.$$$` because CF crashed after ~640 instructions — an `E8`
+near-CALL at `3010:0321` landing in zeroed memory.
 
-**Fastest way to find it (harness recipe):** add `bool dbg` to `Cpu`, print
-`CS:IP op regs` at the top of `step()` when `dbg`, and in `Dos::exec` set
-`cpu_.dbg=true` while `name.find("cf.exe")!=npos` (gate on `getenv("TE")`). Build the
-**working** tree too (`git stash` / checkout the 386-core `cpu.*`+`memory.h`, keep the
-same dbg hook) as `dosemu_old.exe`. Run both `TE=1 ... LCC.EXE PROG.C 2>trace`, grep
-`^3010:`, and `diff` the two CF traces — the **first differing line** is the buggy
-opcode. (Watch the shell: cp932/heredoc mangles C string escapes; use the Edit tool,
-not python heredocs, to patch the trace into committed files.)
+Cause: **widening `ip` from `uint16_t` to `uint32_t` deleted an invariant nobody had
+written down.** While `ip` was 16 bits, every `ip += rel` wrapped inside the 64 KiB
+segment for free — which is exactly what a 16-bit code segment does. As a `uint32_t`
+it no longer wrapped, so a backward branch from a low offset produced `0xFFFF9708`
+instead of `0x9708`, and `lin(CS, ip)` — which adds `CS<<4` and masks to 20 bits —
+turned that into a linear address **exactly 64 KiB below** the intended one. Reading
+zeros there was a symptom two steps removed from the cause, which is why the earlier
+diagnosis (a stray write zeroing code) pointed the wrong way. Note the trap: the
+address *looked* right when printed as `CS:IP` with IP truncated for display.
 
-**Prime suspects** (real-mode reductions of the refactor that could still be wrong):
-`set_seg` side effects on far RET/CALL; `sp_get/sp_set` vs the old `r[SP]-=2`; a
-`seg_idx` defaulting to the wrong segment on some ModRM form (writes going to CS/ES
-instead of DS/SS → would zero code); `lin()` masking; or an `aluv`/flags edge that
-flips a `Jcc`. Test target after any fix: `LCC.EXE PROG.C` → run, and
-`node web/test_shell.mjs`.
+Fix: `Cpu::ip_mask` (`0xFFFF` in a 16-bit code segment, `0xFFFFFFFF` when the CS
+descriptor has D=1), maintained by `set_seg`, applied by `Cpu::jump()` and by the
+`fetch*` advance. Every near transfer — Jcc short and near, `E8`/`E9`/`EB`, LOOP*/
+JCXZ, `C2`/`C3`, `FF /2`, `FF /4` — goes through `jump()`; the far ones (`EA`, `9A`,
+`CA`, `CB`, `CF`, `FF /3`, `FF /5`, and `interrupt()`) now load CS **before** jumping,
+so the new segment's width is already in `ip_mask`. Drive-by: `FF /2` (CALL near rm)
+now reads its target before pushing, which matters once an operand can be ESP-relative.
+
+**The general lesson** (this is the second time on this project): a refactor that
+widens a type silently deletes whatever the narrow type was enforcing. `uint16_t ip`
+was not a storage choice, it was the 16-bit-segment wrap rule. Same shape as the
+FreeCOM NLS lesson below — the code was *more correct* in the narrow case by accident,
+and making it general removed the accident without replacing it.
+
+Verified: `LCC.EXE PROG.C` → `PROG.exe` → `sum=55`; `node web/test_shell.mjs`
+(SHELL DEMO OK), `web/test_bundle.mjs` (BUNDLE OK), `web/test_node.mjs` (DOS + LSI C
+IN WASM OK) after rebuilding `web/dosemu.js`.
+
+**Fixture note for a fresh clone:** `lsic/`, `scratch_root/` and `fdos/` are gitignored
+and absent, but `web/lsic.tar.gz` **is committed** and contains the whole LSI C tree
+plus `COMMAND.COM`. So: `mkdir -p scratch_root && tar xzf web/lsic.tar.gz -C scratch_root`
+and `cp -r scratch_root/LSIC86 lsic` reconstitutes everything the tests need — no LZH
+extractor required.
 
 Scratch fixtures (gitignored): `scratch_root/` = a drive with `LSIC86/`, `PROG.C`,
 `COMMAND.COM`; build with `cc.sh ... -Fe:dosemu.exe`; run

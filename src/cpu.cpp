@@ -53,8 +53,9 @@ void Cpu::interrupt(uint8_t n) {
     push16(static_cast<uint16_t>(ip));
     set_flag(IF, false);
     set_flag(TF, false);
-    ip = mem_.r16(n * 4);
+    uint16_t no = mem_.r16(n * 4);
     set_seg(CS, mem_.r16(n * 4 + 2));
+    jump(no);
 }
 
 void Cpu::step() {
@@ -235,7 +236,7 @@ void Cpu::step() {
         // long Jcc rel16/32
         if (op2 >= 0x80 && op2 <= 0x8F) {
             int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16());
-            if (cc(op2 & 0xF)) ip += rel;
+            if (cc(op2 & 0xF)) jump(ip + rel);
             return;
         }
         // SETcc rm8
@@ -393,7 +394,7 @@ void Cpu::step() {
         // Jcc rel8 (70-7F)
         case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
         case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F: {
-            int8_t rel = static_cast<int8_t>(fetch8()); if (cc(op & 0xF)) ip += rel; break; }
+            int8_t rel = static_cast<int8_t>(fetch8()); if (cc(op & 0xF)) jump(ip + rel); break; }
 
         // Group 1: ALU rm, imm  (80/81/83)
         case 0x80: { Modrm m; decode_modrm(m); uint8_t imm = fetch8(); uint8_t v = alu8(m.reg, r8m(m), imm); if (m.reg != 7) w8m(m, v); break; }
@@ -500,8 +501,8 @@ void Cpu::step() {
         }
 
         // RET / RET imm16 (near)
-        case 0xC2: { uint16_t n = fetch16(); ip = popV(); sp_set(sp_get() + n); break; }
-        case 0xC3: ip = popV(); break;
+        case 0xC2: { uint16_t n = fetch16(); jump(popV()); sp_set(sp_get() + n); break; }
+        case 0xC3: jump(popV()); break;
         // LES / LDS
         case 0xC4: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(ES, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }
         case 0xC5: { Modrm m; decode_modrm(m); srw(m.reg, o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m))); set_seg(DS, mem_.r16(pa(m) + (o32 ? 4 : 2))); break; }
@@ -516,26 +517,26 @@ void Cpu::step() {
             srw(BP, fp); srw(SP, grw(SP) - frame); break; }
         case 0xC9: { srw(SP, grw(BP)); srw(BP, popV()); break; }                    // LEAVE
         // RET far
-        case 0xCA: { uint16_t n = fetch16(); ip = popV(); set_seg(CS, static_cast<uint16_t>(popV())); sp_set(sp_get() + n); break; }
-        case 0xCB: { ip = popV(); set_seg(CS, static_cast<uint16_t>(popV())); break; }
+        case 0xCA: { uint16_t n = fetch16(); uint32_t no = popV(); set_seg(CS, static_cast<uint16_t>(popV())); jump(no); sp_set(sp_get() + n); break; }
+        case 0xCB: { uint32_t no = popV(); set_seg(CS, static_cast<uint16_t>(popV())); jump(no); break; }
         // INT
         case 0xCC: interrupt(3); break;
         case 0xCD: { uint8_t n = fetch8(); interrupt(n); break; }
         case 0xCE: if (get_flag(OF)) interrupt(4); break;
-        case 0xCF: { ip = popV(); set_seg(CS, static_cast<uint16_t>(popV())); flags = (popV() & 0xFFFF) | 0x0002; break; }   // IRET
+        case 0xCF: { uint32_t no = popV(); set_seg(CS, static_cast<uint16_t>(popV())); flags = (popV() & 0xFFFF) | 0x0002; jump(no); break; }   // IRET
 
         // CALL / JMP
-        case 0xE8: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); pushV(ip); ip += rel; break; }   // CALL near rel
-        case 0xE9: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); ip += rel; break; }              // JMP near rel
-        case 0xEA: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); ip = no; set_seg(CS, ns); break; }                                 // JMP far
-        case 0xEB: { int8_t rel = static_cast<int8_t>(fetch8()); ip += rel; break; }                                                        // JMP short
-        case 0x9A: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); pushV(sreg[CS]); pushV(ip); ip = no; set_seg(CS, ns); break; }     // CALL far
+        case 0xE8: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); pushV(ip); jump(ip + rel); break; }   // CALL near rel
+        case 0xE9: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); jump(ip + rel); break; }              // JMP near rel
+        case 0xEA: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); set_seg(CS, ns); jump(no); break; }                                 // JMP far
+        case 0xEB: { int8_t rel = static_cast<int8_t>(fetch8()); jump(ip + rel); break; }                                                        // JMP short
+        case 0x9A: { uint32_t no = fetchImmV(); uint16_t ns = fetch16(); pushV(sreg[CS]); pushV(ip); set_seg(CS, ns); jump(no); break; }     // CALL far
 
         // LOOP / JCXZ
-        case 0xE0: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0 && !get_flag(ZF)) ip += rel; break; }  // LOOPNZ
-        case 0xE1: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0 &&  get_flag(ZF)) ip += rel; break; }  // LOOPZ
-        case 0xE2: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0) ip += rel; break; }                   // LOOP
-        case 0xE3: { int8_t rel = static_cast<int8_t>(fetch8()); if (r[CX] == 0) ip += rel; break; }                     // JCXZ
+        case 0xE0: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0 && !get_flag(ZF)) jump(ip + rel); break; }  // LOOPNZ
+        case 0xE1: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0 &&  get_flag(ZF)) jump(ip + rel); break; }  // LOOPZ
+        case 0xE2: { int8_t rel = static_cast<int8_t>(fetch8()); if (--r[CX] != 0) jump(ip + rel); break; }                   // LOOP
+        case 0xE3: { int8_t rel = static_cast<int8_t>(fetch8()); if (r[CX] == 0) jump(ip + rel); break; }                     // JCXZ
 
         // IN/OUT (no hardware; read 0, ignore writes)
         case 0xE4: fetch8(); sb(AX, 0); break;
@@ -590,10 +591,12 @@ void Cpu::step() {
             switch (m.reg) {
                 case 0: wvm(m, aluv(0, rvm(m), 1)); set_flag(CF, c); break;   // INC
                 case 1: wvm(m, aluv(5, rvm(m), 1)); set_flag(CF, c); break;   // DEC
-                case 2: pushV(ip); ip = rvm(m); break;                       // CALL near rm
-                case 3: { uint32_t no = o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + (o32 ? 4 : 2)); pushV(sreg[CS]); pushV(ip); ip = no; set_seg(CS, ns); break; }  // CALL far rm
-                case 4: ip = rvm(m); break;                                 // JMP near rm
-                case 5: { uint32_t no = o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + (o32 ? 4 : 2)); ip = no; set_seg(CS, ns); break; }  // JMP far rm
+                // Read the target before pushing: with 32-bit addressing the operand can be
+                // ESP-relative, and a real 386 evaluates it against the pre-push ESP.
+                case 2: { uint32_t no = rvm(m); pushV(ip); jump(no); break; }                       // CALL near rm
+                case 3: { uint32_t no = o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + (o32 ? 4 : 2)); pushV(sreg[CS]); pushV(ip); set_seg(CS, ns); jump(no); break; }  // CALL far rm
+                case 4: jump(rvm(m)); break;                                 // JMP near rm
+                case 5: { uint32_t no = o32 ? mem_.r32(pa(m)) : mem_.r16(pa(m)); uint16_t ns = mem_.r16(pa(m) + (o32 ? 4 : 2)); set_seg(CS, ns); jump(no); break; }  // JMP far rm
                 case 6: pushV(rvm(m)); break;                               // PUSH rm
             } break; }
 

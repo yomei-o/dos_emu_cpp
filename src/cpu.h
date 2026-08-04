@@ -55,6 +55,13 @@ public:
     uint32_t sbase[6] = {0};
     uint32_t slimit[6] = {0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF};
     bool cs_d = false, ss_d = false;
+    // How wide the instruction pointer is *in the current code segment*. When ip was a
+    // uint16_t this was implicit: every ip += rel wrapped inside the 64 KiB segment, which
+    // is what a 16-bit code segment does. Widening ip to 32 bits silently removed that, so
+    // a backward branch from a low offset became 0xFFFFxxxx and the linear address landed
+    // 64 KiB below the segment — in zeroed memory. Every write to ip goes through this
+    // mask; it is 0xFFFFFFFF only inside a D=1 (32-bit) code segment.
+    uint32_t ip_mask = 0xFFFFu;
 
     bool pe() const { return (cr[0] & 1) != 0; }
     // Linear address for a segment index + offset. Real mode wraps at 1 MiB exactly
@@ -69,7 +76,9 @@ public:
     void set_seg(int i, uint16_t sel) {
         sreg[i] = sel;
         if (!pe()) { sbase[i] = static_cast<uint32_t>(sel) << 4; slimit[i] = 0xFFFF;
-                     if (i == CS) cs_d = false; if (i == SS) ss_d = false; return; }
+                     if (i == CS) { cs_d = false; ip_mask = 0xFFFFu; }
+                     if (i == SS) ss_d = false;
+                     return; }
         uint32_t tbl = (sel & 4) ? ldt_base : gdt_base;
         uint32_t da = tbl + (sel & ~7u);
         uint32_t limlo = mem_.r16(da);
@@ -80,8 +89,14 @@ public:
         if (g & 0x80) lim = (lim << 12) | 0xFFF;
         sbase[i] = base; slimit[i] = lim;
         bool big = (g & 0x40) != 0;
-        if (i == CS) cs_d = big; if (i == SS) ss_d = big;
+        if (i == CS) { cs_d = big; ip_mask = big ? 0xFFFFFFFFu : 0xFFFFu; }
+        if (i == SS) ss_d = big;
     }
+
+    // Every near control transfer goes through this: a 16-bit code segment wraps EIP at
+    // 64 KiB, a 32-bit one does not. Far transfers set CS first, so the new segment's
+    // width is already in ip_mask by the time they land here.
+    void jump(uint32_t v) { ip = v & ip_mask; }
 
     // Byte-register access (AL/CL/DL/BL/AH/CH/DH/BH by ModRM index 0..7).
     uint8_t  gb(int i) const { return i < 4 ? (r[i] & 0xFF) : (r[i - 4] >> 8); }
@@ -120,10 +135,11 @@ public:
 private:
     Memory& mem_;
 
-    // instruction fetch (via lin() so it follows the code segment's base)
-    uint8_t  fetch8()  { uint8_t v = mem_.r8(lin(CS, ip)); ip += 1; return v; }
-    uint16_t fetch16() { uint16_t v = mem_.r16(lin(CS, ip)); ip += 2; return v; }
-    uint32_t fetch32() { uint32_t v = mem_.r32(lin(CS, ip)); ip += 4; return v; }
+    // Instruction fetch (via lin() so it follows the code segment's base). The advance is
+    // masked for the same reason as jump(): in a 16-bit segment ip wraps at 0xFFFF.
+    uint8_t  fetch8()  { uint8_t v = mem_.r8(lin(CS, ip)); ip = (ip + 1) & ip_mask; return v; }
+    uint16_t fetch16() { uint16_t v = mem_.r16(lin(CS, ip)); ip = (ip + 2) & ip_mask; return v; }
+    uint32_t fetch32() { uint32_t v = mem_.r32(lin(CS, ip)); ip = (ip + 4) & ip_mask; return v; }
 
     [[noreturn]] void fail(const std::string& msg, uint8_t op);
 };
