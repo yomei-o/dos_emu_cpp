@@ -18,6 +18,11 @@ same page can hand a `.c` or a `.cpp` to a real `gcc`/`g++` and run the 32-bit
 executable that comes out. The DJGPP archives are in `upstream/`, unmodified, with
 `web/DJGPP-LICENSE.md` recording their GPL terms and source URLs.
 
+A third toolchain, **Watcom C/C++ 11.0c**, compiles here too — its compilers run under
+FlashTek's X-32 extender, which turned out to want rather more of a 386 than DJGPP does
+(its own GDT and IDT, the application at ring 3, a TSS stack switch on every DOS call).
+Linking is not there yet; [`OPENWATCOM.md`](OPENWATCOM.md) says exactly what is missing.
+
 ## How it works (same shape as the sibling project)
 
 ```
@@ -62,7 +67,11 @@ Both are static pages; nothing leaves the browser.
 5. ✅ WebAssembly build + browser demo (edit a `.c`, compile & run in the page)
 6. ✅ 80386 core + protected mode + a built-in **DPMI host** → DOS-extended programs run
 7. ✅ **DJGPP gcc and g++** compile C and C++ to 32-bit `.EXE`s, in the browser too
-8. ⏭ OpenWatcom (an MZ + **LE** image, DOS/4GW) — needs an LE loader
+8. ✅ **Watcom C/C++ 11.0c** — `wcc386`, `wcc` and `wpp386` compile C and C++ to `.obj`
+   under FlashTek X-32, which the emulator now runs (its own GDT/IDT, CPL 3, a TSS
+   stack switch). `wlink` does not yet: it is stubbed for DOS/4GW, and DOS/4GW wants
+   two more DPMI functions. [`OPENWATCOM.md`](OPENWATCOM.md) has the whole account,
+   including the six emulator bugs the exercise turned up.
 
 ## Building
 
