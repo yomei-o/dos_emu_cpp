@@ -13,13 +13,14 @@ Working notes for picking the project back up. The README says what the emulator
 >    `scratch_root/fp.c`, which `get_fixtures.sh djgpp` writes:
 >    `H10=2.928968 sqrt2=1.414214 sin1=0.841471`. Getting there took two fixes, both
 >    worth knowing about, in "The x87 was wrong twice" below.
-> 2. **The Watcom linker**, if it is worth it. `wlink` is stubbed for DOS/4GW, which now
->    gets through its selector setup, allocates DOS memory and reads wlink's 32-bit image
->    off disk before stopping — not on a missing function but on a structural mismatch:
->    it reflects DOS calls by issuing `INT 21h` from protected mode with 32-bit offsets,
->    and a host aliasing a selector to a paragraph can only carry 16. Finishing means real
->    DPMI reflection with a transfer buffer and a DOS layer that takes linear addresses.
->    `OPENWATCOM.md` weighs that against writing the OMF linker ourselves.
+> 2. **The Watcom linker**, if it is worth it. `wlink` is stubbed for DOS/4GW, and
+>    DOS/4GW now runs: it walks the MCB chain, takes all of memory, hooks INT 21h and INT
+>    31h, forwards INT 31h to us correctly, enters 32-bit protected mode, executes about
+>    80,000 instructions and then exits with status 8 having printed nothing. **No DPMI
+>    function fails any more** bar `0A00h`, which every client probes. So it is one silent
+>    decision inside a 259 KiB extender rather than a list of gaps — findable, but
+>    open-ended. `OPENWATCOM.md` weighs it against writing the OMF linker ourselves, which
+>    is looking better by comparison.
 >
 > **Fixed since the last note:** `Coprocessor not present and DPMI setup failed!` is gone
 > from every DJGPP program — it was INT 31h **0303h** (real-mode callbacks) all along,

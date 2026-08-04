@@ -230,20 +230,51 @@ one 8086 instruction and one internal inconsistency:
   for INT 6 spelled. With no GDT there is nothing a GDT selector can mean, so it now
   means what the only table we have says.
 
-DOS/4GW now gets through its selector setup, allocates DOS memory, and reads wlink's own
-32-bit image off disk. **It stops there, and the reason is structural rather than another
-missing function:** it reflects DOS calls by issuing `INT 21h` from protected mode with
-32-bit offsets. Our DOS layer reads its arguments as segment:offset, so the best a host
-can do is alias a selector to the paragraph it covers — which works, and is what a real
-host does, but truncates a 32-bit offset to 16 bits. Serving that properly means real DPMI
-reflection: a transfer buffer in conventional memory, arguments copied in and out per
-function, and the whole DOS layer taught to take a linear address instead of a pair.
+### Protected-mode interrupts have to reach the handler that hooked them
 
-That is a bigger piece than everything above put together, and it buys exactly one
-program. The alternative is to stop using `wlink` and write the OMF linker ourselves —
-`src/coff_loader.cpp` is the model for the file parsing, and the `.obj` the compilers
-already produce is the input. More work, but *our* work, with no third-party extender in
-the way and nothing left to reverse-engineer.
+The apparent wall after that — DOS calls arriving with "selector base 0, offset 0" and a
+file read landing on the interrupt vector table — was not a limit of what a host can do.
+It was us. We stored what a client registered with `0205h` and never dispatched to it.
+DOS/4GW hooks **both INT 21h and INT 31h** precisely so its own handler can translate a
+call before passing it down; skipping that handed the DOS layer a flat 32-bit pointer and
+let it read 21 KiB of a file over low memory. Same shape as the guest-owns-the-IDT case
+above: a client that hooks a vector means it.
+
+Three details had to be right before it worked at all, and each was worth an hour:
+
+- **The frame width comes from the client, not from the handler's code segment.** DOS/4GW
+  registers handlers in the 16-bit alias selector the mode switch handed it and unwinds
+  them with `IRETD`. Reading the width off the selector pushed three words and had six
+  popped, straight into a not-present selector.
+- **`0204h` has to name a real default handler.** A client reads all 256 vectors at
+  startup and saves them to chain to; `0:0` for an un-hooked one is a jump to nowhere.
+  There are 256 one-byte stubs in the host's entry paragraph now, and reaching one
+  services the interrupt and unwinds the frame itself.
+- **The default handler must not dispatch back to the client.** Chaining is a request for
+  the *host's* behaviour; handing the call back to the handler that just chained is a loop
+  with no exit, and it presented as the emulator running at 2,500 instructions a second.
+
+And `INT 16h AH=01h` stopped answering "yes, Enter is waiting" unconditionally. A caller
+that believes that issues the blocking read; DOS/4GW polls the keyboard during startup and
+stopped dead with no output at all, which is the hardest kind of hang to find because a
+process asleep in a read looks exactly like one wedged in a loop.
+
+### Where the linker actually stands
+
+DOS/4GW gets through its own startup, walks the MCB chain and releases what is not its,
+grows its block to all of memory, hooks INT 21h and INT 31h, forwards INT 31h to us
+correctly, switches to 32-bit protected mode, runs about 80,000 instructions of 32-bit
+code — and then calls `AH=4Ch` with status 8, having printed nothing at all. **No DPMI
+function fails any more** except `0A00h`, which is a probe every client makes.
+
+So it is no longer a list of missing pieces; it is one silent decision inside a 259 KiB
+extender, and finding it means following that 80,000 instructions. That is a real
+possibility now in a way it was not before, but it is open-ended.
+
+The alternative has not changed and is looking better in comparison: stop using `wlink` and
+write the OMF linker ourselves. `src/coff_loader.cpp` is the model for the file parsing,
+and the `.obj` the compilers already produce is the input. More work, but *our* work, with
+no third-party extender in the way and nothing left to reverse-engineer.
 
 The alternative, if the chain turns out to be a bad trade, is to stop using `wlink` and
 write the OMF linker ourselves; `src/coff_loader.cpp` is the model for the file parsing,
