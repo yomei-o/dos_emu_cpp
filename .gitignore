@@ -9,7 +9,10 @@ lsic/
 tests/*.exe
 fdos/
 *.zip
+# ...except the DJGPP archives exactly as downloaded, kept like lsic330c.lzh is.
+!upstream/*.zip
 djgpp/
 ow/
 scratch_root/
+build_djgpp/
 dosroot/
