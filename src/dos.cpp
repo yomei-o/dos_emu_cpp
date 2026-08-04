@@ -106,6 +106,42 @@ void Dos::init_psp(uint16_t psp, uint16_t parent, const std::string& path) {
 // looks back — but a loader stub EXECs a helper and expects to still be findable, and
 // the shared block meant loading the helper *overwrote the parent's own program name*
 // with the helper's. DOS gives every program its own block; so do we now.
+// A program's own full path lives after its environment strings: a double NUL, a word
+// count of 1, then the ASCIIZ path. DOS 3.0+ writes it at load time, and it writes it
+// into the block the caller supplied as much as into one it copied — a program has to be
+// able to find itself whoever built its environment.
+//
+// Skipping that for a caller-supplied block is what broke `wcl hello.c`. wcl copies its
+// strings into a new block and stops there, count = 0 and no name; wcc's 32-bit stub then
+// looks up its own path to record it as `$=<path>` for W32RUN to load, finds nothing, and
+// writes `$=`. W32RUN duly EXECs the empty string: `Can't open ''; rc=2`. Nothing in that
+// chain reports a missing path — each step faithfully passes on the emptiness.
+//
+// In place if the block has room, otherwise a copy; and always a copy when the caller
+// handed us its *own* environment, because stamping that would overwrite the parent's
+// name with the child's and take away the parent's ability to find itself.
+uint16_t Dos::stamp_env_path(uint16_t env, const std::string& path) {
+    uint16_t end = 0;                                   // first byte past the double NUL
+    for (uint16_t i = 0; i < 8192; ++i)
+        if (!mem_.rb(env, i) && !mem_.rb(env, i + 1)) { end = static_cast<uint16_t>(i + 2); break; }
+    const size_t need = static_cast<size_t>(end) + 2 + path.size() + 1;
+    const size_t bi = mem_find(env);
+    const size_t have = (bi != blocks_.size()) ? static_cast<size_t>(blocks_[bi].paras) * 16 : 0;
+    if (env == env_seg || need > have) {
+        if (trace) std::fprintf(stderr, "[env] supplied block %04X %s; copying\n", env,
+                                env == env_seg ? "is the parent's own" : "has no room for the path");
+        return make_child_env(env, path);
+    }
+    mem_.ww(env, end, 1);
+    for (size_t i = 0; i < path.size(); ++i)
+        mem_.wb(env, static_cast<uint16_t>(end + 2 + i), static_cast<uint8_t>(path[i]));
+    mem_.wb(env, static_cast<uint16_t>(end + 2 + path.size()), 0);
+    if (trace) std::fprintf(stderr, "[env] supplied block %04X stamped with \"%s\"\n", env, path.c_str());
+    return env;
+}
+
+// The child's environment when the caller asked to inherit: the parent's strings, then
+// the child's own path as described above.
 uint16_t Dos::make_child_env(uint16_t parent_env, const std::string& parent_path) {
     // Copied *verbatim*, trailing program name included — the child does NOT get its
     // own name here. That is the DOS behaviour, and it is deliberate on the guest's
@@ -148,7 +184,8 @@ uint16_t Dos::make_child_env(uint16_t parent_env, const std::string& parent_path
         std::fputc('\n', stderr);
     }
     const uint16_t paras = static_cast<uint16_t>((b.size() + 15) / 16);
-    const uint16_t seg = mem_alloc(paras);
+    const uint16_t seg = mem_alloc_at(paras, true);   // below the child, not at the bottom of memory
+    if (trace) std::fprintf(stderr, "[env] child env at %04X (%u paras)\n", seg, paras);
     if (!seg) return parent_env;                            // no room: share, as before
     for (size_t i = 0; i < b.size(); ++i) mem_.wb(seg, static_cast<uint16_t>(i), b[i]);
     return seg;
@@ -221,17 +258,32 @@ uint16_t Dos::mem_largest() const {
     return best;
 }
 
-uint16_t Dos::mem_alloc(uint16_t paras) {
+uint16_t Dos::mem_alloc(uint16_t paras) { return mem_alloc_at(paras, false); }
+
+// `biggest` carves out of the largest free block instead of the first one that fits, so
+// the caller lands immediately below whatever takes the rest of that block. That is where
+// DOS puts a child's environment — directly under the PSP — and the difference is not
+// cosmetic. First fit put every environment at the bottom of the arena, and freeing them
+// as children exited left one-paragraph holes down among the interrupt stubs. DOS/4GW
+// sizes itself by allocating one paragraph and growing it to the maximum, repeatedly, so
+// it collected those holes: it came away with a 928-byte block at 0x00A5 as its
+// conventional-memory transfer buffer, wrote DOS call arguments past the end of it, and
+// died with its error message unreadable. Keeping the arena's low end whole makes the
+// nested case look like the standalone one, which always worked.
+uint16_t Dos::mem_alloc_at(uint16_t paras, bool biggest) {
     if (!paras) paras = 1;
+    size_t pick = blocks_.size();
     for (size_t i = 0; i < blocks_.size(); ++i) {
         if (blocks_[i].used || blocks_[i].paras < paras) continue;
-        const uint16_t seg = static_cast<uint16_t>(blocks_[i].seg + 1);
-        if (blocks_[i].paras > paras) mem_split(blocks_[i].seg, paras);
-        blocks_[i].used = true; blocks_[i].owner = psp_seg;
-        mem_publish();
-        return seg;
+        if (!biggest) { pick = i; break; }
+        if (pick == blocks_.size() || blocks_[i].paras > blocks_[pick].paras) pick = i;
     }
-    return 0;
+    if (pick == blocks_.size()) return 0;
+    const uint16_t seg = static_cast<uint16_t>(blocks_[pick].seg + 1);
+    if (blocks_[pick].paras > paras) mem_split(blocks_[pick].seg, paras);
+    blocks_[pick].used = true; blocks_[pick].owner = psp_seg;
+    mem_publish();
+    return seg;
 }
 
 bool Dos::mem_free(uint16_t seg) {
@@ -391,6 +443,15 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     uint16_t spsp = psp_seg, senv = env_seg;
     const std::vector<Block> sblocks = blocks_;   // the child's allocations unwind with it
     const std::string sname = prog_path;
+    // The DTA and the directory search running through it belong to the *process*: on DOS
+    // the search state lives in the 21 reserved bytes of the DTA, so a child cannot
+    // disturb its parent's FindFirst/FindNext no matter what it searches for. Ours is one
+    // shared vector, and leaving it shared cost `wcl hello.c`: wcl expands its file
+    // arguments with FindFirst, runs wcc, and calls FindNext — and got the last thing the
+    // child had looked for, which is how it came to try and compile `_COMDEF.H`.
+    const uint16_t sdta_seg = dta_seg_, sdta_off = dta_off_;
+    const std::vector<Found> sfind = find_;
+    const size_t sfind_pos = find_pos_;
 
     // The parameter block's environment word: a segment to use as is, or 0 meaning
     // "inherit". DOS inherits by *copying* the parent's strings into a new block and
@@ -405,6 +466,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     // environment block was empty; it was overwritten by its reader.
     uint16_t child_env = mem_.rw(pb_seg, pb_off);
     if (!child_env) child_env = make_child_env(senv, name);
+    else               child_env = stamp_env_path(child_env, name);
 
     // The child gets everything that is free, which is what DOS does: it hands the
     // program the largest block and lets it shrink to what it needs. A fixed 96 KiB was
@@ -416,10 +478,12 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     std::string err;
     if (!load_program(file, cpu_, child_psp, tail, err, name, child_env)) {
         cpu_.restore(parent); psp_seg = spsp; blocks_ = sblocks; env_seg = senv; prog_path = sname;
+        dta_seg_ = sdta_seg; dta_off_ = sdta_off; find_ = sfind; find_pos_ = sfind_pos;
         cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
     }
     init_psp(child_psp, spsp, name);  // the child's parent is us
     psp_seg = child_psp;
+    dta_seg_ = child_psp; dta_off_ = 0x80;   // a program starts with its own PSP:80h as DTA
 
     // Run the child to completion.
     bool saved_exited = child_exited_; child_exited_ = false;
@@ -431,6 +495,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
 
     // Restore the parent and hand it the child's exit code (via AH=4Dh).
     cpu_.restore(parent); psp_seg = spsp; blocks_ = sblocks; env_seg = senv; prog_path = sname;
+    dta_seg_ = sdta_seg; dta_off_ = sdta_off; find_ = sfind; find_pos_ = sfind_pos;
     last_child_code_ = code;
     cpu_.flags &= ~CF; cpu_.r[AX] = 0;
     return true;

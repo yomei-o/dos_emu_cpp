@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dos_emu_cpp — DJGPP gcc/g++ compiling 32-bit C and C++ in your browser</title>
+<title>dos_emu_cpp — Watcom C/C++ compiling and linking in your browser</title>
 <style>
   :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#c9d1d9; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --err:#f85149; --warn:#d29922; }
   * { box-sizing: border-box; }
@@ -34,30 +34,30 @@
 </head>
 <body>
 <main>
-  <h1>32-bit C and C++ compiled by <code>DJGPP&nbsp;gcc/g++</code>, in your browser</h1>
+  <h1>C and C++ compiled and linked by <code>Watcom&nbsp;C/C++&nbsp;11.0c</code>, in your browser</h1>
   <p class="sub">
     <a href="https://github.com/yomei-o/dos_emu_cpp">dos_emu_cpp</a> is an 8086/80386 MS-DOS
     emulator in C++/WebAssembly, with a <b>built-in DPMI host</b> so DOS-extended programs run.
-    Below, the real <b>DJGPP gcc 3.4.6</b> compiles the source in the editor to a 32-bit
-    protected-mode <code>.EXE</code> — and then the emulator runs that. Compiler, assembler,
-    linker and the program are all guest code; nothing leaves your browser.
+    Below, the real <b>Watcom compiler and linker</b> turn the source in the editor into a DOS
+    <code>.EXE</code> — and then the emulator runs that. Compiler, linker and program are all
+    guest code; nothing leaves your browser.
   </p>
 
   <div class="panel">
     <h2>Source <span>— pick a language, edit freely</span></h2>
     <div class="row" style="margin-bottom:10px">
       <button id="tabC" class="on">hello.c</button>
-      <button id="tabCpp">mini.cpp</button>
-      <span class="hint" style="margin:0">the file name decides which compiler runs: <code>cc1</code> or <code>cc1plus</code></span>
+      <button id="tabCpp">hello.cpp</button>
+      <span class="hint" style="margin:0">the file name decides which compiler runs: <code>wcc</code> or <code>wpp</code></span>
     </div>
     <textarea id="code" spellcheck="false"></textarea>
   </div>
 
   <div class="panel">
     <div class="row" style="margin-bottom:10px">
-      <button id="load" class="go">Load DJGPP (7.9 MB)</button>
-      <button id="build" disabled>Compile &amp; run</button>
-      <button id="asm" disabled>Show assembly</button>
+      <button id="load" class="go">Load Watcom (1.7 MB)</button>
+      <button id="build" disabled>Compile, link &amp; run</button>
+      <button id="map" disabled>Show link map</button>
       <span id="status" class="hint" style="margin:0">the toolchain is fetched only when you ask for it</span>
     </div>
     <div class="steps" id="steps"></div>
@@ -65,19 +65,20 @@
   </div>
 
   <p class="hint">
-    The four passes are driven from this page rather than by the <code>gcc</code> driver:
-    <code>cc1</code> → <code>as</code> → <code>ld</code> → <code>stubify</code>. gcc 3.4.6's own
-    driver cannot exec <code>cc1</code> out of <code>libexec/</code> under this emulator, and the
-    4.7.4 build whose driver does work is three times the size and takes about a minute per
-    file. Running the passes here is quicker, and each stage leaves a real artefact you can look at.
+    Three DOS programs deep, and each one leans on a different part of the emulator.
+    <code>wcc</code> and <code>wpp</code> are stubbed for <b>FlashTek X-32</b> and hand themselves
+    to <code>w32run.exe</code>, which is not a DPMI client at all: it loads its own IDT, runs the
+    application at ring 3 and reflects DOS calls itself. <code>wlink</code> is a
+    <b>DOS/4GW</b> program, which <i>is</i> a client of the built-in DPMI host and passes its DOS
+    calls back down through <code>INT&nbsp;31h 0302h</code>. What they build is plain 16-bit real
+    mode. If you would rather watch one command do all of it, <code>wcl hello.c</code> works too.
   </p>
 
   <footer>
-    DJGPP is redistributed under the GPL; see
-    <a href="DJGPP-LICENSE.md">DJGPP-LICENSE.md</a> for provenance and source URLs.
-    The Watcom C/C++ demo, which compiles <i>and links</i>, is
-    <a href="watcom.html">here</a>; the 16-bit one with FreeDOS and LSI C-86 is
-    <a href="index.html">here</a>.
+    Watcom C/C++ is redistributed under the Sybase Open Watcom Public License; see
+    <a href="WATCOM-LICENSE.md">WATCOM-LICENSE.md</a> for provenance and source URLs.
+    The 32-bit DJGPP demo is <a href="djgpp.html">here</a>, and the 16-bit one with FreeDOS
+    and LSI C-86 is <a href="index.html">here</a>.
   </footer>
 </main>
 
@@ -85,7 +86,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const out = $('out'), stepsEl = $('steps');
-let M = null, loaded = false, lang = 'c', lastAsm = null;
+let M = null, loaded = false, lang = 'c', lastMap = null;
 
 const SRC = {
   c: `#include <stdio.h>
@@ -95,37 +96,36 @@ int main(void)
 \tint i, s = 0;
 \tfor (i = 1; i <= 10; i++)
 \t\ts += i;
-\tprintf("hello from DJGPP gcc, sum=%d\\n", s);
+\tprintf("hello from Watcom C, sum=%d\\n", s);
 \treturn 0;
 }
 `,
-  cpp: `#include <cstdio>
+  cpp: `#include <stdio.h>
 
-template <typename T>
-static T triangle(T n)
+struct Greeter {
+\tconst char* who;
+\tGreeter(const char* w) : who(w) {}
+\tvirtual ~Greeter() {}
+\tvirtual void hello(int n) const { printf("hello from %s, sum=%d\\n", who, n); }
+};
+
+struct Loud : Greeter {
+\tLoud(const char* w) : Greeter(w) {}
+\tvoid hello(int n) const { printf("HELLO FROM %s, SUM=%d\\n", who, n); }
+};
+
+static int triangle(int n)
 {
-\tT s = T();
-\tfor (T i = 1; i <= n; ++i)
+\tint s = 0;
+\tfor (int i = 1; i <= n; ++i)
 \t\ts += i;
 \treturn s;
 }
 
-struct Greeter {
-\tconst char* who;
-\texplicit Greeter(const char* w) : who(w) {}
-\tvirtual ~Greeter() {}
-\tvirtual void hello(int n) const { std::printf("hello from %s, sum=%d\\n", who, n); }
-};
-
-struct Loud : Greeter {
-\texplicit Loud(const char* w) : Greeter(w) {}
-\tvoid hello(int n) const { std::printf("HELLO FROM %s, SUM=%d\\n", who, n); }
-};
-
 int main()
 {
-\tGreeter a("DJGPP g++");
-\tLoud b("DJGPP g++");
+\tGreeter a("Watcom C++");
+\tLoud b("Watcom C++");
 \tconst Greeter* v[2] = { &a, &b };
 \tfor (int i = 0; i < 2; i++)
 \t\tv[i]->hello(triangle(10));
@@ -154,19 +154,17 @@ function setSteps(names) {
 }
 const mark = (n, cls) => { const e = $('st-' + n); if (e) e.className = 'step ' + cls; };
 
-// Guest output arrives here. DJGPP's startup banner about the coprocessor is expected
-// and would only be noise: the x87 is emulated, but 0303h/0E01h (the hooks its FPU
-// emulator wants) are not, so every DJGPP program says so on the way up.
+// Guest output arrives here. The banners are real output from real programs, so they stay;
+// only the emulator's own note about an unimplemented DOS call is filtered, because
+// wlink's exit path probes one (AH=66h, code pages) and the answer changes nothing.
 let buf = '';
 globalThis.dosemuOutput = (fd, bytes) => { buf += new TextDecoder().decode(bytes, { stream: true }); };
 globalThis.dosemuLog = m => { buf += '[emu] ' + m + '\n'; };
 const drain = () => {
   const t = buf; buf = '';
-  return t.split('\n').filter(l => !/Coprocessor not present|floating operations system/.test(l)).join('\n');
+  return t.split('\n').filter(l => !/unimplemented INT 21h/.test(l)).join('\n');
 };
 
-// tar with hard links: cc1 is stored once and linked into bin/, so a link entry has to
-// resolve to the bytes of its target rather than being skipped.
 function untar(b) {
   const o = [];
   for (let p = 0; p + 512 <= b.length;) {
@@ -176,10 +174,8 @@ function untar(b) {
     if (pre) n = pre + '/' + n;
     let s = 0; for (let i = 0; i < 11 && b[p + 124 + i]; i++) s = s * 8 + (b[p + 124 + i] - 48);
     const type = b[p + 156];
-    let link = ''; for (let i = 0; i < 100 && b[p + 157 + i]; i++) link += String.fromCharCode(b[p + 157 + i]);
     p += 512;
     if (type === 0x30 || type === 0) o.push({ name: n.replace(/^\.\//, ''), bytes: b.subarray(p, p + s) });
-    else if (type === 0x31) o.push({ name: n.replace(/^\.\//, ''), link: link.replace(/^\.\//, '') });
     p += Math.ceil(s / 512) * 512;
   }
   return o;
@@ -191,51 +187,48 @@ const dirname = p => p.slice(0, p.lastIndexOf('/'));
 $('load').onclick = async () => {
   $('load').disabled = true;
   out.textContent = '';
-  say('fetching djgpp346.tar.gz …\n', 'note');
+  say('fetching watcom.tar.gz …\n', 'note');
   try {
     M = M || await createDosemu();
     const t0 = performance.now();
-    const gz = new Uint8Array(await (await fetch('djgpp346.tar.gz')).arrayBuffer());
+    const gz = new Uint8Array(await (await fetch('watcom.tar.gz')).arrayBuffer());
     say(`  ${(gz.length / 1e6).toFixed(1)} MB downloaded in ${((performance.now() - t0) / 1000).toFixed(1)} s\n`, 'note');
     // DecompressionStream is in every current browser; no gzip library needed.
     const ds = new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip')));
     const tar = new Uint8Array(await ds.arrayBuffer());
     const t1 = performance.now();
     const files = untar(tar);
-    const seen = new Map();
     for (const f of files) {
       const p = '/dos/' + f.name;
       mkdirp(dirname(p));
-      const bytes = f.link ? seen.get(f.link) : f.bytes;
-      if (!bytes) continue;
-      seen.set(f.name, bytes);
-      M.FS.writeFile(p, bytes);
+      M.FS.writeFile(p, f.bytes);
     }
     say(`  unpacked ${files.length} files in ${((performance.now() - t1) / 1000).toFixed(1)} s\n`, 'note');
-    say('DJGPP 3.4.6 ready.\n', 'ok');
+    say('Watcom C/C++ 11.0c ready.\n', 'ok');
     loaded = true;
     $('build').disabled = false;
-    $('status').textContent = 'gcc 3.4.6 + binutils 2.35.1 in MEMFS';
+    $('status').textContent = 'wcc, wpp, wlink + headers and 16-bit libraries in MEMFS';
   } catch (e) {
     say('load failed: ' + e + '\n', 'err');
     $('load').disabled = false;
   }
 };
 
-const B = '/dos/DJGPP/bin';
-const LIB = ['-LA:/DJGPP/lib', '-LA:/DJGPP/lib/gcc/djgpp/3.46'];
+const B = '/dos/binw';
 
 function run(prog, args) {
   const t = performance.now();
   const rc = M.ccall('dosemu_run', 'number', ['string', 'string', 'string'],
-                     [prog, '/dos', ' ' + args.join(' ')]);
+                     [prog, '/dos', args ? ' ' + args : '']);
   return { rc, ms: performance.now() - t, text: drain() };
 }
 
 function pass(name, prog, args) {
   mark(name, 'run');
   const r = run(prog, args);
-  const txt = r.text.trim();
+  const txt = r.text.split('\n')
+                    .filter(l => !/^Copyright|All rights reserved/.test(l.trim()))
+                    .join('\n').trim();
   if (txt) say(txt + '\n', r.rc === 0 ? 'note' : 'err');
   say(`  ${name} — ${(r.ms / 1000).toFixed(2)} s\n`, r.rc === 0 ? 'note' : 'err');
   mark(name, r.rc === 0 ? 'done' : 'fail');
@@ -244,44 +237,39 @@ function pass(name, prog, args) {
 
 $('build').onclick = () => {
   if (!loaded) return;
-  $('build').disabled = true; $('asm').disabled = true; lastAsm = null;
+  $('build').disabled = true; $('map').disabled = true; lastMap = null;
   out.textContent = '';
-  setSteps(['cc1', 'as', 'ld', 'stubify', 'run']);
-
   const isCpp = lang === 'cpp';
-  const src = isCpp ? 'mini.cpp' : 'hello.c';
-  const base = isCpp ? 'mini' : 'hello';
+  const cc = isCpp ? 'wpp' : 'wcc';
+  setSteps([cc, 'wlink', 'run']);
+
+  const src = isCpp ? 'hello.cpp' : 'hello.c';
+  const exe = isCpp ? 'hellocpp.exe' : 'hello.exe';
   // The guest expects DOS line endings.
   M.FS.writeFile('/dos/' + src, $('code').value.replace(/\r?\n/g, '\r\n'));
-  say(`A:\\${src.toUpperCase()} → ${base.toUpperCase()}.EXE\n\n`, 'cmd');
+  say(`A:\\${src.toUpperCase()} → ${exe.toUpperCase()}\n\n`, 'cmd');
 
   // setTimeout so the first pass label paints before the blocking call.
   setTimeout(() => {
     const t0 = performance.now();
-    const cc = isCpp ? 'cc1plus.exe' : 'cc1.exe';
-    let ok = pass('cc1', `${B}/${cc}`, [src, '-quiet', '-O2', '-o', base + '.s']);
+    let ok = pass(cc, `${B}/${cc}.exe`, src);
     if (ok) {
-      try { lastAsm = new TextDecoder().decode(M.FS.readFile('/dos/' + base + '.s')); $('asm').disabled = false; } catch (e) {}
-      ok = pass('as', `${B}/as.exe`, [base + '.s', '-o', base + '.o']);
+      // `system dos` is defined in wlsystem.lnk, which wlink.lnk includes; both are at the
+      // root of the drive because that is the only place wlink looks. `option map` is here
+      // for the button below -- the map is a real artefact of the link, worth showing.
+      ok = pass('wlink', `${B}/wlink.exe`, `system dos option map file hello.obj name ${exe}`);
+      const mapFile = '/dos/' + exe.replace(/\.exe$/, '.map');   // the map takes the output's name
+      try { lastMap = new TextDecoder().decode(M.FS.readFile(mapFile)); $('map').disabled = false; } catch (e) {}
     }
-    if (ok) {
-      // -lgcc on both sides of -lc: the first copy satisfies __register_frame_info so
-      // libc's rfinfo.o is never pulled in (it would clash), the second provides the
-      // 64-bit division helpers that libc's printf needs.
-      const libs = isCpp ? ['-lstdcxx', '-lsupcxx', '-lgcc', '-lc', '-lgcc']
-                         : ['-lc', '-lgcc'];
-      ok = pass('ld', `${B}/ld.exe`, ['-o', base + '.cof', 'A:/DJGPP/lib/crt0.o', base + '.o', ...LIB, ...libs]);
-    }
-    if (ok) ok = pass('stubify', `${B}/stubify.exe`, [base + '.cof']);
     if (ok) {
       say('\n', null);
       mark('run', 'run');
-      const r = run('/dos/' + base + '.exe', []);
+      const r = run('/dos/' + exe, '');
       say(r.text.trim() + '\n', 'ok');
       mark('run', r.rc === 0 ? 'done' : 'fail');
       let size = 0;
-      try { size = M.FS.readFile('/dos/' + base + '.exe').length; } catch (e) {}
-      say(`\n${(size / 1024).toFixed(0)} KB 32-bit protected-mode .EXE, built and run in `
+      try { size = M.FS.readFile('/dos/' + exe).length; } catch (e) {}
+      say(`\n${(size / 1024).toFixed(0)} KB 16-bit DOS .EXE, compiled, linked and run in `
         + `${((performance.now() - t0) / 1000).toFixed(1)} s.\n`, 'note');
     } else {
       say('\nstopped.\n', 'err');
@@ -290,10 +278,10 @@ $('build').onclick = () => {
   }, 30);
 };
 
-$('asm').onclick = () => {
-  if (!lastAsm) return;
+$('map').onclick = () => {
+  if (!lastMap) return;
   out.textContent = '';
-  say(lastAsm, null);
+  say(lastMap, null);
 };
 </script>
 </body>

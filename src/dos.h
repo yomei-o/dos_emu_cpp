@@ -67,6 +67,7 @@ public:
 
 private:
     uint16_t make_child_env(uint16_t parent_env, const std::string& child_name);
+    uint16_t stamp_env_path(uint16_t env, const std::string& path);
     bool load_overlay(const std::string& name, uint16_t pb_seg, uint16_t pb_off);
 public:
     DosFiles& files() { return files_; }
@@ -116,6 +117,7 @@ private:
     void     mem_split(uint16_t mcb, uint16_t paras);  // carve `paras` off the front
     void     mem_own(uint16_t seg, uint16_t paras);    // claim a range (a program's block)
     uint16_t mem_alloc(uint16_t paras);                // guest segment, or 0 if it does not fit
+    uint16_t mem_alloc_at(uint16_t paras, bool biggest);
     bool     mem_free(uint16_t seg);
     bool     mem_resize(uint16_t seg, uint16_t paras);
     uint16_t mem_largest() const;

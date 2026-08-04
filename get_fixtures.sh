@@ -121,6 +121,14 @@ if [ "$1" = "ow" ]; then
     # at all and cannot decide an output format. So it has to be at the root of the drive
     # the guest starts on, which is ow/ itself.
     cp ow/binw/wlink.lnk ow/binw/wlsystem.lnk ow/
+    # The four 16-bit DOS libraries the component zips cannot supply -- there is no DOS
+    # build of the C++ runtime in them, and no math87s.lib at all. web/watcom.tar.gz has
+    # them (from the OpenWatcom v2 installer; see web/WATCOM-LICENSE.md), and it is
+    # committed, so reconstitute them from there rather than asking for a 128 MB download.
+    if [ -f web/watcom.tar.gz ]; then
+        tar xzf web/watcom.tar.gz -C ow ./lib286/dos 2>/dev/null || true
+        echo "   16-bit libraries from web/watcom.tar.gz, so C++ links too"
+    fi
     echo "   ow/: $(du -sh ow | cut -f1) -- provenance and licences in upstream/README.md"
 
     crlf ow/hello.c <<'WCEOF'

@@ -3,50 +3,74 @@
 Working notes for picking the project back up. The README says what the emulator
 *is*; this says what works, what's next, and what was learned.
 
-> **All work is on `main`** (the MCB chain has been merged; `wip-mcb-chain` is history
-> now). Protected mode and the DPMI host are in and regression-green: DJGPP compiles C
-> and C++, and so do the three Watcom compilers.
+> **All work is on `main`.** Protected mode and the DPMI host are in and regression-green.
+> Three toolchains now compile *and link* inside the emulator: LSI C-86, DJGPP gcc/g++, and
+> **Watcom C/C++ — the linker works too, as of this session.**
 >
-> **HANDOFF (next session starts here).** Everything below is on `main` and green;
-> `wip-mcb-chain` is merged and deleted. The one live thread is the Watcom linker, and it
-> is down to a single diagnosed bug with the fix sketched and one failed attempt written
-> up — jump to **"PICK UP HERE"** in the OpenWatcom section. Reproduce with:
+> **HANDOFF (next session starts here).** Everything is on `main` and green. There is no
+> broken thread to pick up; what follows is a menu, not a queue.
 >
 >     sh get_fixtures.sh ow && sh build.sh
->     ./dosemu --root ow ow/binw/wcc386.exe hello.c                                  # works
->     ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe" # banner, then derails
+>     ./dosemu --root ow ow/binw/wcc.exe   hello.c
+>     ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe"
+>     ./dosemu --root ow hello.exe        # hello from Watcom C, sum=55
+>     ./dosemu --root ow ow/binw/wcl.exe  hello.c    # ...or the driver, in one command
 >
 > Regression before committing anything: `./dosemu --root scratch_root
 > scratch_root/LSIC86/BIN/LCC.EXE PROG.C` then `PROG.exe` (sum=55), `COMMAND.COM /C "lcc
-> prog.c"`, `fp.exe` (H10=2.928968 sqrt2=1.414214 sin1=0.841471), the three Watcom
-> compilers, and — after `EMCC=<path> sh web/build.sh` — all four of `web/test_shell.mjs`,
-> `test_node.mjs`, `test_bundle.mjs`, `test_djgpp.mjs`.
+> prog.c"`, `fp.exe` (H10=2.928968 sqrt2=1.414214 sin1=0.841471), DJGPP `hello.exe` and
+> `mini.exe`, the Watcom compilers + `wcl hello.c`, and — after `EMCC=<path> sh
+> web/build.sh` — all **five** of `web/test_shell.mjs`, `test_node.mjs`, `test_bundle.mjs`,
+> `test_djgpp.mjs`, `test_watcom.mjs`.
 >
-> **What to pick up.** Nothing is broken, so this is a choice rather than a queue:
+> **What was done this session** (details in `OPENWATCOM.md`, "Where the linker actually
+> stands"):
 >
-> 1. **The x87 now computes correctly** through libm and `printf("%f")` — verified by
->    `scratch_root/fp.c`, which `get_fixtures.sh djgpp` writes:
->    `H10=2.928968 sqrt2=1.414214 sin1=0.841471`. Getting there took two fixes, both
->    worth knowing about, in "The x87 was wrong twice" below.
-> 2. **The Watcom linker**, if it is worth it. DOS/4GW runs its whole startup, hooks INT
->    21h and INT 31h, reflects DOS calls through INT 31h **0302h** (implemented now), and
->    its output reaches the console. It still exits 8, and the message it is trying to
->    print — `DOS/16M error: ...` — comes out as saved interrupt-vector records, because
->    the write reads through DS = 0x003F rather than the paragraph the frame's selector
->    aliases. The bug is now one variable wide: `sreg[DS]` holds 0x0110 at the end of
->    `rm_call()` and 0x003F one instruction later at the DOS write, with no `set_seg`
->    between them and nothing else in the emulator assigning `sreg[]` except the SegAlias
->    destructor, which cannot run there. **A data breakpoint on `cpu.sreg[3]` settles it**;
->    another round of printf will not. **No DPMI function
->    fails any more** bar `0A00h`, which every client probes. So what is left is one
->    question about DOS/4GW's internal layout, not about the host; `OPENWATCOM.md` has the
->    hex dump and the measurements, and weighs it against writing the OMF linker
->    ourselves, which is looking better by comparison.
+> - **The linker links.** Two DPMI-host bugs: `pm_int_default()` unwound the interrupt
+>   frame on top of `rm_call()`'s transfer of control (so DOS/4GW ended up executing the
+>   interrupt vector table), and `rm_return()` reported the flags an IRET had just
+>   restored from the host's own fabricated frame instead of the ones the real-mode
+>   procedure computed — throwing away `CF`, which is the whole result of a DOS `open`.
+>   `Cpu::iret_flags` keeps them. The second bug is why wlink claimed
+>   `invalid library file attribute` about a library it had never opened.
+> - **`wcl` works**, which took three EXEC fixes: a program's own path must be stamped
+>   into a caller-supplied environment block (DOS 3.0+ does this, and Watcom's stub reads
+>   it back to tell `w32run.exe` what to load); the DTA and the FindFirst/FindNext state
+>   belong to the process and must not leak from a child to its parent; and a child's
+>   environment belongs immediately below the child, not at the bottom of the arena, where
+>   freeing it left one-paragraph holes that DOS/4GW's sizing loop collected as its
+>   transfer buffer.
+> - **A third browser demo**: `web/watcom.html` + `web/watcom.tar.gz` (1.7 MB) + `node
+>   web/test_watcom.mjs`, rebuilt by `sh make_watcom_bundle.sh`. Provenance and the one
+>   version mix — the 16-bit libraries are OpenWatcom v2's, and why they have to be — are
+>   in `web/WATCOM-LICENSE.md`.
+> - The **DPMI trace now goes to stderr** rather than stdout. It used to interleave with
+>   the guest's own output (`Error! E2012: ...[dpmi] real-mode call returned`) and vanish
+>   whenever a run died before the buffer flushed; correlating it with `DOSEMU_DOS_TRACE`
+>   is how both linker bugs were found.
 >
-> **Fixed since the last note:** `Coprocessor not present and DPMI setup failed!` is gone
-> from every DJGPP program — it was INT 31h **0303h** (real-mode callbacks) all along,
-> exactly as this file predicted. argv was fixed earlier; the account of it below is
-> history, not an open bug.
+> **What to pick up.** All optional:
+>
+> 1. **OpenWatcom v2's own DOS binaries do not run.** Their DOS/4G stub builds its PATH
+>    search without a separator — `A:\BINWDOS4GW.EXE` — and gives up, while 11.0c's stub in
+>    the same environment builds `A:\BINW\dos4gw.exe` correctly. Since the v2 *libraries*
+>    are what a C++ link needs, finding out what the v2 stub reads that we answer
+>    differently would remove the version mix. Reproduce by extracting `ow-dos.exe` (the v2
+>    installer is an ordinary zip) and running its `wcc.exe`.
+> 2. **A 32-bit Watcom link** stops at `__grab_fpe_` in `math387r.lib`, a package
+>    `upstream/` does not have. Adding `mth_d32`-equivalent zips to `upstream/` would
+>    finish `system dos4g`. Not an emulator problem.
+> 3. **`INT 21h AH=5Dh` and `AH=66h`** are probed (by DJGPP's libc and wlink's exit path
+>    respectively) and unimplemented. Both callers carry on, so this is noise removal, but
+>    the messages are in every trace.
+> 4. **DOS 8.3 case folding.** `wpp386` writes `HELLO.obj` where `wcc` writes `hello.obj`;
+>    leave both in one directory and `wlink` reads the wrong one
+>    (`E3146: HELLO.obj is an invalid object file`). Only reachable by mixing two
+>    compilers' output under one name, but it says the file layer's case handling is not
+>    quite DOS's.
+> 5. **The x87 computes correctly** through libm and `printf("%f")` — `scratch_root/fp.c`,
+>    which `get_fixtures.sh djgpp` writes. Two fixes, both worth knowing about, in "The x87
+>    was wrong twice" below.
 
 ## State (all verified, on the browser build too)
 
@@ -68,9 +92,13 @@ protected mode with a built-in DPMI host for DOS-extended programs.
   (nested EXECs) into a DOS `.EXE`, which then runs.
 - **FreeDOS COMMAND.COM** (FreeCOM 0.86) runs to an interactive prompt: `dir`, `ver`,
   `echo`, `type`, `cd`, `md`/`rd`, and external programs all work.
-- **Browser demo** (`web/`, GitHub Pages): a FreeDOS prompt; each line runs as
-  `COMMAND.COM /C <cmd>`. Headless tests: `web/test_node.mjs`, `test_bundle.mjs`,
-  `test_shell.mjs`.
+- **Watcom C/C++ 11.0c** compiles *and links*: `wcc`/`wpp` (16-bit, under FlashTek X-32)
+  and `wcc386`/`wpp386`, then `wlink` (under DOS/4GW, a DPMI client) into a DOS `.EXE`
+  that runs. `wcl hello.c` does it in one command.
+- **Browser demos** (`web/`, GitHub Pages): a FreeDOS prompt where each line runs as
+  `COMMAND.COM /C <cmd>`, plus the DJGPP and Watcom compiler pages. Headless tests:
+  `web/test_node.mjs`, `test_bundle.mjs`, `test_shell.mjs`, `test_djgpp.mjs`,
+  `test_watcom.mjs`.
 
 The compiler and shell are gitignored downloads: `lsic330c.lzh` (in repo) extracts
 to `lsic/`; FreeCOM is `fdos/`; the browser bundle is `web/lsic.tar.gz`.
@@ -337,13 +365,21 @@ For the record, the interpreter is **21.7 M instructions/sec** (the whole LSI C 
 chain, 5.26 M instructions, in 0.24 s). When something takes minutes it is looping, not
 slow — measure before optimising.
 
-**The browser demos.** Two pages, both static, both keeping everything client-side:
+**The browser demos.** Three pages, all static, all keeping everything client-side:
 
 - `web/index.html` — the 16-bit one: FreeDOS COMMAND.COM, LSI C-86, `lsic.tar.gz`.
 - `web/djgpp.html` — the 32-bit one: DJGPP **gcc 3.4.6** compiles C or C++ from a text
   area to a protected-mode `.EXE`, which the emulator then runs. `djgpp346.tar.gz` is
   7.9 MB and is fetched only when you press the button; it is gunzipped with
   `DecompressionStream` so no library is needed.
+- `web/watcom.html` — **Watcom C/C++ 11.0c**, compiler *and* linker: `wcc`/`wpp` writes a
+  `.obj`, `wlink` links it into a DOS `.EXE`, the emulator runs it, and the page will show
+  you the link map. `watcom.tar.gz` is 1.7 MB and the whole round trip is about a second
+  for either language. Three DOS programs deep, and each one uses a different part of the
+  emulator: the compilers run under FlashTek X-32 (not a DPMI client — its own IDT, ring
+  3), the linker under DOS/4GW (a DPMI client reflecting through `INT 31h 0302h`), and
+  what they build is plain 16-bit real mode. `sh make_watcom_bundle.sh` rebuilds the
+  bundle; `web/WATCOM-LICENSE.md` records what is in it.
 
 The page drives the four passes itself — `cc1` → `as` → `ld` → `stubify` — rather than
 using the `gcc` driver, for two reasons. 3.4.6's driver cannot exec `cc1` out of

@@ -1,9 +1,9 @@
 # OpenWatcom — where it stands
 
-The third toolchain. **The compilers work**: `wcc386` (32-bit C), `wcc` (16-bit C) and
-`wpp386` (C++) all run inside the emulator and write a `.obj`. Linking does not; the
-linker section below says how far DOS/4GW gets and why the last step is a bigger piece of
-work than everything before it.
+The third toolchain, and it now goes the whole way. **The compilers work** — `wcc386`
+(32-bit C), `wcc` (16-bit C), `wpp`/`wpp386` (C++) — **and so does the linker**: `wlink`
+runs under DOS/4GW as a client of the built-in DPMI host and writes a DOS `.EXE` that then
+runs. `wcl`, the driver, does compile and link in one command.
 
     sh get_fixtures.sh ow
     ./dosemu --root ow ow/binw/wcc386.exe hello.c     # -> hello.obj, "Code size: 44"
@@ -14,6 +14,18 @@ work than everything before it.
     Copyright by Sybase, Inc., and its subsidiaries, 1984, 2002.
     hello.c: 10 lines, included 477, 0 warnings, 0 errors
     Code size: 44
+
+and all the way through:
+
+    ./dosemu --root ow ow/binw/wcc.exe   hello.c
+    ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe"
+    ./dosemu --root ow hello.exe          # hello from Watcom C, sum=55
+
+    ./dosemu --root ow ow/binw/wcl.exe   hello.c      # or the driver, in one command
+
+The browser demo is `web/watcom.html`, and `node web/test_watcom.mjs` is the same
+sequence headless. What made the difference is in **"Where the linker actually stands"**
+below.
 
 Note that 11.0c predates the standard library headers: `<stdio.h>`, not `<cstdio>`, and
 no `std::`. That is the compiler being old, not the emulator being wrong.
@@ -326,27 +338,81 @@ layer's segment:offset accessors through `Cpu::lin()`, or add a second watchpoin
 DOS-layer read is currently invisible to the only tool we have for "who touched this
 address".
 
-### Where the linker actually stands
+### Where the linker actually stands — it links
 
-DOS/4GW gets through its own startup, walks the MCB chain and releases what is not its,
-grows its block to all of memory, hooks INT 21h and INT 31h, forwards INT 31h to us
-correctly, switches to 32-bit protected mode, runs about 80,000 instructions of 32-bit
-code — and then calls `AH=4Ch` with status 8, having printed nothing at all. **No DPMI
-function fails any more** except `0A00h`, which is a probe every client makes.
+Two bugs, both in the DPMI host, both of a kind this file has now seen several times: an
+answer that was well-formed and wrong, so the damage surfaced a long way from the cause.
 
-So it is no longer a list of missing pieces; it is one silent decision inside a 259 KiB
-extender, and finding it means following that 80,000 instructions. That is a real
-possibility now in a way it was not before, but it is open-ended.
+**A host routine that transfers control must not have its caller unwind after it.**
+`Dpmi::pm_int_default()` is the address `0204h` reports as the host's own handler for a
+vector, so a client can chain to it. It serviced the interrupt and then emulated the IRET:
+pop EIP/CS/EFLAGS from the client's stack, resume. But for `0301h`/`0302h` the service *is*
+a transfer of control — `rm_call()` drops the CPU to real mode, points CS:IP at the
+client's real-mode procedure and returns, expecting the guest to run it next. Unwinding on
+top of that popped three dwords off the *real-mode* stack and jumped to what it found,
+`0000:00000051`, and DOS/4GW spent the rest of its life executing the interrupt vector
+table. `rm_call()` now reports that it transferred (`rm_transferred_`),
+`pm_int_default()` records the IRET it owes in the `RmCall`, and `rm_return()` performs it
+once the client's context has been restored. This is the third instance of the same
+mistake (the first was `SegAlias` restoring a segment register after `0302h` had loaded it
+for real mode), which is why it is stated as a rule.
 
-The alternative has not changed and is looking better in comparison: stop using `wlink` and
-write the OMF linker ourselves. `src/coff_loader.cpp` is the model for the file parsing,
-and the `.obj` the compilers already produce is the input. More work, but *our* work, with
-no third-party extender in the way and nothing left to reverse-engineer.
+**The flags an IRET restores are the host's own fabrication, not a result.** With the
+derail fixed, `wlink` ran all the way to "searching libraries" and then said
+`E2012: file clib3r.lib: invalid library file attribute` about a library it had never
+opened. The reflected `open` had failed with "no such file"; `CF` was lost on the way back,
+so wlink took the error code 2 for a file handle and read whatever that gave it. The path
+is worth following, because nothing about it is unusual:
 
-The alternative, if the chain turns out to be a bad trade, is to stop using `wlink` and
-write the OMF linker ourselves; `src/coff_loader.cpp` is the model for the file parsing,
-and the Watcom `.obj` we already produce is the input. That is more work but it is *our*
-work, with no third-party extender in the way.
+    app INT 21h -> DOS/4GW's own handler -> INT 31h 0302h -> host rm_call
+      -> real mode, `int 21h; iret` at 0050:0084 -> back to the host's trap
+
+That `iret` is the client's own instruction, and an IRET restores the flags image from the
+frame — which for `0302h` *this host* fabricated before the call. So by the time
+`rm_return()` copies the registers back into the client's real-mode call structure, the one
+thing the client is waiting for has been overwritten with a value that means nothing. `CF`
+is the entire result of a DOS `open`. `Cpu::iret_flags` keeps the flags from immediately
+before an IRET, and `rm_return()` reports those for an IRET-frame call.
+
+With those two, `wcc` + `wlink` builds a running `.EXE`. Three more were needed for `wcl`,
+the driver, and all three are about EXEC rather than DPMI:
+
+- **A program's own path has to be in its environment even when the caller supplied the
+  block.** DOS 3.0+ writes the full pathname after the environment strings at load time,
+  and it does that for a block the caller passed as much as for one it copied. wcl copies
+  its strings into a new block and stops there — count 0, no name. wcc's 32-bit stub then
+  looks up its own path to record it as `$=<path>` for `w32run.exe` to load, finds nothing,
+  and writes `$=`. W32RUN duly EXECs the empty string: `Can't open ''; rc=2`. Nothing in
+  that chain reports a missing path; each step faithfully passes on the emptiness.
+- **The DTA, and the directory search running through it, belong to the process.** On DOS
+  the search state lives in the DTA's 21 reserved bytes, so a child cannot disturb its
+  parent's FindFirst/FindNext. Ours was one shared vector: wcl expands its file arguments
+  with FindFirst, runs wcc, calls FindNext, and got the last thing the *child* had looked
+  for — which is how it came to try and compile `_COMDEF.H`.
+- **An environment block belongs immediately below the program, not at the bottom of
+  memory.** First fit put every child environment down among the interrupt stubs, and
+  freeing them as children exited left one-paragraph holes there. DOS/4GW sizes itself by
+  allocating one paragraph and growing it to the maximum, repeatedly, so it collected those
+  holes: it came away with a 928-byte block at `0x00A5` as its conventional-memory transfer
+  buffer, wrote DOS call arguments past the end of it, and died with its error message
+  unreadable. `mem_alloc_at(paras, biggest)` carves a child's environment out of the
+  largest free block instead, so it lands under the child and the arena's low end stays
+  whole.
+
+**What is left.** Nothing blocking, and two things worth knowing:
+
+- A **32-bit** link (`system dos4g` on a `wcc386` object) reaches "creating a DOS/4G
+  executable" and stops at `__grab_fpe_`, which lives in `math387r.lib` — a package the
+  w11.0c component zips do not ship. A missing library, not a linker problem. The 16-bit
+  path is complete, which is what `web/watcom.tar.gz` carries.
+- **OpenWatcom v2's own DOS binaries still do not run.** Their DOS/4G stub builds its PATH
+  search without a separator (`A:\BINWDOS4GW.EXE`) and gives up; 11.0c's stub, in the same
+  environment, builds `A:\BINW\dos4gw.exe` correctly. Since the v2 *libraries* are what the
+  C++ link needs (`web/WATCOM-LICENSE.md` explains why), it is worth finding out what the
+  v2 stub reads that we answer differently.
+
+Writing the OMF linker ourselves — the alternative this file used to recommend — is no
+longer necessary, though `src/coff_loader.cpp` is still the model if anyone wants to.
 
 ## Also worth knowing
 

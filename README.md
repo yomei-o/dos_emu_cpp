@@ -18,10 +18,12 @@ same page can hand a `.c` or a `.cpp` to a real `gcc`/`g++` and run the 32-bit
 executable that comes out. The DJGPP archives are in `upstream/`, unmodified, with
 `web/DJGPP-LICENSE.md` recording their GPL terms and source URLs.
 
-A third toolchain, **Watcom C/C++ 11.0c**, compiles here too — its compilers run under
-FlashTek's X-32 extender, which turned out to want rather more of a 386 than DJGPP does
-(its own GDT and IDT, the application at ring 3, a TSS stack switch on every DOS call).
-Linking is not there yet; [`OPENWATCOM.md`](OPENWATCOM.md) says exactly what is missing.
+A third toolchain, **Watcom C/C++ 11.0c**, now goes the whole way: its compilers run under
+FlashTek's X-32 extender, which wanted rather more of a 386 than DJGPP does (its own GDT
+and IDT, the application at ring 3, a TSS stack switch on every DOS call), and `wlink` runs
+under DOS/4GW as a client of the built-in DPMI host. So `wcc` + `wlink` — or `wcl` in one
+command — builds a DOS `.EXE` that then runs. [`OPENWATCOM.md`](OPENWATCOM.md) is the full
+account.
 
 ## How it works (same shape as the sibling project)
 
@@ -56,7 +58,16 @@ Compile C *or* C++ to a 32-bit protected-mode `.EXE` and run it — 2.0 s for C,
 for C++ in wasm. The page drives the four passes itself (`cc1` → `as` → `ld` →
 `stubify`) and will show you the assembly gcc produced.
 
-Both are static pages; nothing leaves the browser.
+**[Watcom C/C++ 11.0c — compile *and* link](https://yomei-o.github.io/dos_emu_cpp/web/watcom.html)**
+The real Watcom compiler and linker, in the page. `wcc`/`wpp` compiles C or C++ to an
+`.obj`, `wlink` links it into a DOS `.EXE`, and the emulator runs that — about a second for
+either language, from a 1.7 MB download. Three DOS programs deep, and each leans on a
+different part of the emulator: the compilers run under **FlashTek X-32** (not a DPMI client
+at all — its own IDT, ring 3), the linker under **DOS/4GW** (a DPMI client, reflecting its
+DOS calls through `INT 31h 0302h`), and what they build is plain 16-bit real mode. The page
+will also show you the link map.
+
+All three are static pages; nothing leaves the browser.
 
 ## Status
 
@@ -67,11 +78,13 @@ Both are static pages; nothing leaves the browser.
 5. ✅ WebAssembly build + browser demo (edit a `.c`, compile & run in the page)
 6. ✅ 80386 core + protected mode + a built-in **DPMI host** → DOS-extended programs run
 7. ✅ **DJGPP gcc and g++** compile C and C++ to 32-bit `.EXE`s, in the browser too
-8. ✅ **Watcom C/C++ 11.0c** — `wcc386`, `wcc` and `wpp386` compile C and C++ to `.obj`
-   under FlashTek X-32, which the emulator now runs (its own GDT/IDT, CPL 3, a TSS
-   stack switch). `wlink` does not yet: it is stubbed for DOS/4GW, and DOS/4GW wants
-   two more DPMI functions. [`OPENWATCOM.md`](OPENWATCOM.md) has the whole account,
-   including the six emulator bugs the exercise turned up.
+8. ✅ **Watcom C/C++ 11.0c** — `wcc`, `wcc386`, `wpp` and `wpp386` compile C and C++
+   under FlashTek X-32, which the emulator runs (its own GDT/IDT, CPL 3, a TSS stack
+   switch), and **`wlink` links**, running under DOS/4GW as a DPMI client. `wcl hello.c`
+   does compile and link in one command, and the `.EXE` runs.
+   [`OPENWATCOM.md`](OPENWATCOM.md) has the whole account, including the emulator bugs
+   the exercise turned up — the last two being an interrupt frame unwound over a
+   transfer of control, and a `CF` result thrown away by the very `IRET` that returned it.
 
 ## Building
 
