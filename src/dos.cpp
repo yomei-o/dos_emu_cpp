@@ -64,6 +64,34 @@ void Dos::init_psp(uint16_t psp, uint16_t parent) {
     mem_.wb(psp, 0x50, 0xCD); mem_.wb(psp, 0x51, 0x21); mem_.wb(psp, 0x52, 0xCB);
 }
 
+// Build a child's environment: a copy of the parent's strings, then the child's own
+// full path, in a block of its own.
+//
+// There used to be exactly one environment block, at a fixed segment, rebuilt for
+// whoever loaded last. That is fine while only one program runs at a time and nobody
+// looks back — but a loader stub EXECs a helper and expects to still be findable, and
+// the shared block meant loading the helper *overwrote the parent's own program name*
+// with the helper's. DOS gives every program its own block; so do we now.
+uint16_t Dos::make_child_env(uint16_t parent_env, const std::string& child_name) {
+    std::vector<uint8_t> b;
+    for (uint16_t i = 0; i < 8192; ++i) {          // the strings, up to the double NUL
+        const uint8_t c = mem_.rb(parent_env, i);
+        b.push_back(c);
+        if (!c && !mem_.rb(parent_env, i + 1)) break;
+    }
+    b.push_back(0);                                 // end of strings
+    b.push_back(1); b.push_back(0);                 // count of trailing strings
+    for (char c : child_name) b.push_back(static_cast<uint8_t>(c));
+    b.push_back(0);
+
+    const uint16_t paras = static_cast<uint16_t>((b.size() + 15) / 16);
+    if (heap_next_ + paras > heap_end_) return parent_env;   // no room: share, as before
+    const uint16_t seg = heap_next_;
+    heap_next_ += paras;
+    for (size_t i = 0; i < b.size(); ++i) mem_.wb(seg, static_cast<uint16_t>(i), b[i]);
+    return seg;
+}
+
 void Dos::terminate(int code) {
     if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
     cpu_.exit_code = code;
@@ -101,8 +129,14 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
     uint16_t child_psp = heap_next_;
     heap_next_ += 0x1800;   // ~96 KiB for the child (LSI C passes are small)
 
+    // The parameter block's environment word: a segment to use as is, or 0 meaning
+    // "inherit". DOS inherits by *copying* the parent's strings into a new block and
+    // appending the child's own path, which is where a C runtime finds argv[0].
+    uint16_t child_env = mem_.rw(pb_seg, pb_off);
+    if (!child_env) child_env = make_child_env(mem_.rw(spsp, 0x2C), name);
+
     std::string err;
-    if (!load_program(file, cpu_, child_psp, tail, err, name, mem_.rw(pb_seg, pb_off))) {
+    if (!load_program(file, cpu_, child_psp, tail, err, name, child_env)) {
         cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap;
         cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
     }

@@ -42,6 +42,10 @@ public:
     // reads its command tail never looks at these; one that has to find the program
     // that launched it does, and Watcom's W32RUN is exactly that.
     void init_psp(uint16_t psp, uint16_t parent);
+
+private:
+    uint16_t make_child_env(uint16_t parent_env, const std::string& child_name);
+public:
     DosFiles& files() { return files_; }
 
     bool handle(uint8_t n);

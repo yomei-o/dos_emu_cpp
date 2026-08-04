@@ -47,11 +47,21 @@ target is not on the command line. The instruction trace at the point it gives u
 return — it is looking something up and not finding it. Candidates, in the order worth
 trying:
 
-- the **parent's** environment, reached through `PSP:16h` → parent PSP → `PSP:2Ch`.
-  That chain now works (it did not before — see below), and the parent's environment
-  does carry `A:\BINW\WCC386.EXE` as its trailing program name.
-- a Watcom-specific environment variable the real installation sets.
-- something passed in the `EXEC` parameter block's FCB fields, which we ignore.
+- ~~the **parent's** environment, reached through `PSP:16h` → parent PSP → `PSP:2Ch`~~
+  — **ruled out by measurement.** `DOSEMU_WATCH=1000-1040` (the parent PSP) and
+  `DOSEMU_WATCH=30010-30020` (the child's own `PSP:16h`) show W32RUN never reads
+  either. The only read of the parent PSP in the whole run is the stub fetching its own
+  environment segment before the `EXEC`. The chain works now — the fix was worth making
+  regardless, see below — but it is not the mechanism.
+- a Watcom-specific environment variable, or something the stub *adds* to the
+  environment before EXEC. Worth dumping the child's environment as W32RUN receives it.
+- the `EXEC` parameter block's two FCB pointers, which we ignore entirely, and the
+  child PSP's FCB fields at `5Ch`/`6Ch`, which we never fill in.
+- that the flow is not what it looks like: perhaps W32RUN is only meant to *install* an
+  extender and hand back, and the stub is supposed to do the loading. Against that: the
+  stub does `4Bh`, then `4Dh` (reads the child's exit code, gets 0), then `4Ch` — it
+  simply runs W32RUN and quits. Worth confirming by disassembling the stub at
+  `0110:06A9`, which is where the `EXEC` is issued.
 
 `DOSEMU_DOS_TRACE=1` prints every call with its instruction count, and paths and EXEC
 tails in full; `DOSEMU_TRACE=lo-hi` then shows the instructions between any two of
@@ -87,6 +97,14 @@ other bug on this project — a well-formed answer that was not true.
   flag. Watcom's loader installs its interrupt handlers with `AH=25h` and checks CF
   afterwards; it read the leftover and concluded the install had failed. `int21()` now
   clears CF on entry, which is what DOS does, and failures say so explicitly.
+- **There was exactly one environment block**, at a fixed segment, rebuilt for whoever
+  loaded last. Fine while one program runs at a time and nobody looks back — but
+  `EXEC`ing a helper *overwrote the parent's own program name* with the helper's, which
+  is precisely the thing a loader stub would want to read. Every program now gets its
+  own block: `make_child_env()` copies the parent's strings and appends the child's
+  path, which is what DOS does and where a C runtime finds `argv[0]`. This was a latent
+  bug for DJGPP too — `gcc`'s environment was being clobbered the moment it spawned
+  `cc1`.
 - **The PSP was missing the fields that describe *context* rather than arguments**:
   `02h` (segment past the end of this program's memory, the same ceiling `AH=4Ah` now
   reports), `16h` (**the parent's PSP** — a loader stub that has to find the program
