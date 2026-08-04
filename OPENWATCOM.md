@@ -61,13 +61,37 @@ end-of-strings NUL, taking the count word and program name with it, so a faithfu
 of the parent's block has `$` but no name, and a rebuilt block has a name but no `$`.
 `make_child_env()` copies the strings and *regenerates* the name, keeping both.
 
-**Where it stops now.** W32RUN loads its own 32-bit part, switches to protected mode,
-and the 32-bit code runs about **230 instructions** — `AH=35h` twice, `AH=30h` (DOS
-version), `AH=25h` on vector 11h — then exits 0 without opening `wcc386.exe`. Vector 11h
-is the BIOS equipment list, which is a strange thing for a loader to hook, so the first
-thing to check is whether that `AL` is meaningful or whether the code is already off the
-rails. `DOSEMU_TRACE=10196-10285` covers the whole run from the last DOS call to the
-exit; that is 90 instructions and should settle it.
+**Where it stops now, traced instruction by instruction.** W32RUN loads its own 32-bit
+part, switches to protected mode, and the 32-bit code runs about 230 instructions before
+exiting 0. The last 30 of them are unambiguous (`DOSEMU_TRACE=10196-10290`):
+
+    002B:0894  FF ...        -> 002B:0890  C3   ret
+    002B:089A  FF ...        -> 002B:0890  C3   ret
+    002B:08AC  FF ...        -> 002B:0890  C3   ret
+    002B:08B2  FF ...        -> 002B:0890  C3   ret
+    002B:08BA  E9  -> 01E9   push/pop, mov ah,4Ch, int 21h
+
+Four indirect calls in a row, every one of them through a pointer whose value is
+`0x890`, and `0x890` is a bare `ret`. Then it exits. Those are the emulator's own
+execution records, so unlike a guess at the file layout they are reliable.
+
+That reads like a table of initialisation or service routines in which **every slot
+holds the same do-nothing address** — either because it was never populated, or because
+the population depends on something we answered as "nothing available". Finding what
+fills that table is the next step, and it is the last unknown: the target path is
+delivered (`$`), the extender loads and enters protected mode, and it is executing real
+code when it gives up.
+
+Two practical notes for whoever picks this up:
+
+- **Do not disassemble W32RUN at `0x451 + EIP`.** `0x451` is the *file* offset of the
+  32-bit part; the image is loaded elsewhere and the EIPs are offsets into the loaded
+  image. Decoding at the file offset produces plausible-looking nonsense (it even yields
+  an `int 21h` near the right place, which is exactly how such a mistake survives). Get
+  the load address from the destination of the `AH=3Fh` read that pulls in those 0x4410
+  bytes, then disassemble relative to that.
+- The calls arrive from `CS=002B` with `SS=0033`, `d=1` — a 32-bit stack, so the
+  descriptors W32RUN built for itself are being read correctly.
 
 ## Fixed on the way here
 
