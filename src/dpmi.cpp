@@ -297,7 +297,11 @@ void Dpmi::rm_call(bool iret_frame) {
     cpu_.cr[0] &= ~1u;                                   // real mode
     cpu_.ip_mask = 0xFFFFu; cpu_.cs_d = cpu_.ss_d = false;
     load_frame(f);
-    if (!ss && !sp) { ss = scratch_stack_seg(); sp = 0x0F00; }
+    // SP has to be *inside* the scratch block, which is 512 bytes. 0x0F00 was seven times
+    // past its end, so a client that left SS:SP zero would have had every push land on
+    // whatever followed it in conventional memory. simulate_real_int() has always used
+    // 0x0100; this now matches it.
+    if (!ss && !sp) { ss = scratch_stack_seg(); sp = 0x0100; }
     cpu_.set_seg(SS, ss); cpu_.r[SP] = sp;
 
     // The client may have asked us to copy words from its stack onto the real-mode one,
