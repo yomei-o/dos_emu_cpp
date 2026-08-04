@@ -58,7 +58,25 @@ int dosemu_run(const char* prog_host, const char* root, const char* cmdtail) {
 
     std::string err;
     std::string tail = cmdtail ? cmdtail : "";
-    std::string dn = prog_host; { auto s=dn.find_last_of("/\\"); if(s!=std::string::npos) dn=dn.substr(s+1); } for(char&c:dn)c=(char)toupper((unsigned char)c); dn="A:\\"+dn;
+    // argv[0] as the guest will see it: A:\ plus the program's location under `root`,
+    // not just its base name. A program in a subdirectory finds its own installation
+    // by opening argv[0] — DJGPP's gcc does — and with the base name alone it reports
+    // `A:\GCC.EXE: can't open`. Same derivation as main.cpp.
+    std::string dn;
+    {
+        auto slashes = [](std::string s) { for (char& c : s) if (c == '/') c = '\\'; return s; };
+        std::string p = slashes(prog_host), r = slashes(root ? root : "");
+        while (!r.empty() && r.back() == '\\') r.pop_back();
+        if (!r.empty() && r != "." && p.size() > r.size() + 1 &&
+            p.compare(0, r.size(), r) == 0 && p[r.size()] == '\\') {
+            dn = p.substr(r.size() + 1);
+        } else {
+            auto s = p.find_last_of('\\');
+            dn = (s == std::string::npos) ? p : p.substr(s + 1);
+        }
+        for (char& c : dn) c = static_cast<char>(toupper((unsigned char)c));
+        dn = "A:\\" + dn;
+    }
     if (!load_program(file, cpu, 0x0100, tail, err, dn, 0)) { js_log(err.c_str()); return -1; }
     cpu.max_insns = 2000000000ULL;   // ~ generous for a compile; guards against a runaway freezing the page
     dos.psp_seg = 0x0100;

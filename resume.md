@@ -294,6 +294,33 @@ For the record, the interpreter is **21.7 M instructions/sec** (the whole LSI C 
 chain, 5.26 M instructions, in 0.24 s). When something takes minutes it is looping, not
 slow — measure before optimising.
 
+**The browser demos.** Two pages, both static, both keeping everything client-side:
+
+- `web/index.html` — the 16-bit one: FreeDOS COMMAND.COM, LSI C-86, `lsic.tar.gz`.
+- `web/djgpp.html` — the 32-bit one: DJGPP **gcc 3.4.6** compiles C or C++ from a text
+  area to a protected-mode `.EXE`, which the emulator then runs. `djgpp346.tar.gz` is
+  7.9 MB and is fetched only when you press the button; it is gunzipped with
+  `DecompressionStream` so no library is needed.
+
+The page drives the four passes itself — `cc1` → `as` → `ld` → `stubify` — rather than
+using the `gcc` driver, for two reasons. 3.4.6's driver cannot exec `cc1` out of
+`libexec/` here, and 4.7.4 (whose driver does work, and is what
+`web/djgpp.tar.gz`/`get_fixtures.sh` install for native use) is three times the size
+and roughly a minute per file. Driving the passes is 2.0 s for C and 3.5 s for C++ in
+wasm, and each stage leaves an artefact worth showing — the page has a button for the
+generated assembly.
+
+Two link-order details the page bakes in, both learned the hard way:
+`-lgcc` goes on **both** sides of `-lc` (the first copy satisfies `__register_frame_info`
+so libc's `rfinfo.o` is never pulled in and cannot clash with libgcc's unwinder; the
+second provides the 64-bit division helpers libc's `printf` needs), and C++ additionally
+needs `-lstdcxx -lsupcxx` ahead of them.
+
+`node web/test_djgpp.mjs` is the same sequence without a browser, and is the way to
+check the page after touching the emulator: it unpacks the bundle into MEMFS, builds
+both languages and asserts on what the programs print. The tar reader has to follow
+hard links — `cc1` is stored once and linked into `bin/`.
+
 **Also unimplemented, and harmless so far** — every DJGPP program opens with
 `Warning: Coprocessor not present and DPMI setup failed!`. That is exactly two missing
 functions: `0303h` (allocate real-mode callback), used to hook the FPU emulator, and
