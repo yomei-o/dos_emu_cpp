@@ -1,0 +1,84 @@
+// A built-in DPMI 0.90 host, so 32-bit DOS-extended programs (DJGPP's go32, and
+// later DOS/4GW) run without a real CWSDPMI underneath.
+//
+// The shape of the thing: an extender is a 16-bit real-mode stub wrapping a 32-bit
+// image. The stub asks "is a DPMI host present?" via INT 2Fh AX=1687h. We answer yes
+// and hand back a real-mode far address. The stub far-calls it; we switch the CPU to
+// protected mode and far-return into the stub, which is now 16-bit protected-mode
+// code. From there it drives everything through INT 31h — allocate descriptors,
+// allocate extended memory, install handlers, reflect DOS calls back down to real
+// mode — and finally jumps to the 32-bit image.
+//
+// Descriptors live in an LDT we own (DPMI hands clients LDT selectors), in extended
+// memory above the 1 MiB real-mode area. Clients are supposed to treat selectors as
+// opaque, so the only contract is that set_seg() can read them back.
+#pragma once
+#include <cstdint>
+#include <functional>
+#include "cpu.h"
+#include "memory.h"
+
+namespace dosemu {
+
+class Dpmi {
+public:
+    Dpmi(Cpu& cpu, Memory& mem);
+
+    // INT 2Fh AX=1687h — "get DPMI host entry point". Returns true if it consumed
+    // the call. Everything else on 2Fh is left to the DOS layer.
+    bool int2f();
+    // INT 31h — the DPMI service call. Only meaningful in protected mode.
+    bool int31();
+
+    bool active() const { return cpu_.pe(); }
+
+    // Reflect an interrupt down to the real-mode handler (the DOS layer). Set by the
+    // owner; used by INT 31h function 0300h and by DOS calls made from protected mode.
+    std::function<bool(uint8_t)> real_int;
+    // Allocate conventional memory (paragraphs -> segment, 0 on failure) for function
+    // 0100h. It has to come from the DOS layer's allocator: the block the client asks
+    // for here is the same conventional memory INT 21h AH=48h hands out, and two
+    // allocators over one heap would overlap.
+    std::function<uint16_t(uint16_t)> alloc_dos;
+
+    // Log every INT 31h call and its outcome. On by default when DOSEMU_DPMI_TRACE is
+    // set; the point is to find out what a client actually needs rather than guessing
+    // at the 60-odd functions in the spec.
+    bool trace = false;
+
+private:
+    Cpu& cpu_;
+    Memory& mem_;
+
+    // Where the client far-calls to enter protected mode. A real-mode paragraph that
+    // nothing else uses: the IVT and BIOS data end at 0x0500, the environment block
+    // the loader builds sits at 0x00F0, and programs load from 0x0100 upward.
+    static constexpr uint16_t kEntrySeg = 0x00E0;
+
+    // Our LDT, in extended memory just above the 1 MiB real-mode window.
+    static constexpr uint32_t kLdtBase  = 0x00110000;
+    static constexpr int      kLdtCount = 1024;          // 8 KiB of descriptors
+    // Extended memory handed out by function 0501h starts here.
+    static constexpr uint32_t kHeapBase = 0x00200000;    // 2 MiB
+    uint32_t heap_next_ = kHeapBase;
+
+    int next_sel_ = 1;                                   // LDT index, 0 is the null one
+
+    uint16_t scratch_ss_ = 0;
+
+    // Protected-mode exception and interrupt handlers the client installed. Stored and
+    // returned faithfully; nothing dispatches to them yet, because nothing in the
+    // emulator raises a fault or an IRQ.
+    struct Handler { uint16_t sel = 0; uint32_t off = 0; };
+    Handler exc_[32], pmint_[256];
+
+    void switch_to_pm();
+    void simulate_real_int();
+    uint16_t scratch_stack_seg();
+    // Allocate `count` consecutive LDT descriptors; returns the first selector.
+    uint16_t alloc_sel(int count = 1);
+    void set_desc(uint16_t sel, uint32_t base, uint32_t limit, bool code, bool big);
+    uint32_t desc_addr(uint16_t sel) const { return kLdtBase + (sel & ~7u); }
+};
+
+}  // namespace dosemu

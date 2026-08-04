@@ -266,6 +266,22 @@ void Cpu::step() {
             case 0x06: cr[0] &= ~0x8u; break;        // CLTS (clear TS)
             case 0x08: case 0x09: break;             // INVD / WBINVD: no-op
             case 0x0B: fail("UD2", op2); break;
+            // LAR / LSL: read a descriptor's access rights or limit. DJGPP's startup
+            // uses LSL to discover how big the flat segment the extender gave it is,
+            // so a 32-bit client hits these within a few instructions of its entry.
+            // ZF reports validity; we only reject a not-present descriptor, since the
+            // host builds every selector a client can hold.
+            case 0x02: { Modrm m; decode_modrm(m);                                    // LAR r, rm16
+                const Desc dsc = read_desc(static_cast<uint16_t>(rvm(m)));
+                set_flag(ZF, dsc.present);
+                if (dsc.present) srw(m.reg, (static_cast<uint32_t>(dsc.ar) << 8)
+                                          | (static_cast<uint32_t>(dsc.hi & 0xF0) << 16));
+                break; }
+            case 0x03: { Modrm m; decode_modrm(m);                                    // LSL r, rm16
+                const Desc dsc = read_desc(static_cast<uint16_t>(rvm(m)));
+                set_flag(ZF, dsc.present);
+                if (dsc.present) srw(m.reg, dsc.limit);
+                break; }
             case 0x20: { uint8_t b = fetch8(); sd(b & 7, cr[(b >> 3) & 7]); break; }   // MOV r32, CRn
             case 0x21: { uint8_t b = fetch8(); sd(b & 7, dr[(b >> 3) & 7]); break; }   // MOV r32, DRn
             case 0x22: { uint8_t b = fetch8(); cr[(b >> 3) & 7] = gd(b & 7); break; }  // MOV CRn, r32

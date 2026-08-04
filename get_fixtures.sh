@@ -38,8 +38,8 @@ if [ "$1" = "djgpp" ]; then
     else
         python -c "import zipfile;zipfile.ZipFile('djgpp/djdev205.zip').extractall('djgpp')"
     fi
-    cp djgpp/bin/djecho.exe scratch_root/DJECHO.EXE
-    echo "   djgpp/bin/djecho.exe -> scratch_root/DJECHO.EXE (i386 COFF, entry 0x18B0)"
+    for p in djecho stubify dtou getconf; do cp djgpp/bin/$p.exe scratch_root/; done
+    echo "   djecho/stubify/dtou/getconf -> scratch_root/ (i386 COFF; djecho entry 0x18B0)"
 fi
 
 cat <<'EOF'
@@ -48,5 +48,5 @@ done. Now:
   sh build.sh
   ./dosemu --root scratch_root scratch_root/LSIC86/BIN/LCC.EXE PROG.C   # then run PROG.exe -> sum=55
   node web/test_shell.mjs && node web/test_bundle.mjs && node web/test_node.mjs
-  DOSEMU_RUNSTUB=1 ./dosemu --root scratch_root scratch_root/DJECHO.EXE  # -> "no DPMI ..." (expected)
+  ./dosemu --root scratch_root scratch_root/stubify.exe                 # a 32-bit DJGPP program
 EOF

@@ -3,14 +3,14 @@
 Working notes for picking the project back up. The README says what the emulator
 *is*; this says what works, what's next, and what was learned.
 
-> **All work is on `main` again.** `wip-pmode-dpmi` was merged once its LSI C
-> regression was fixed (see "The regression, and what it actually was" below);
-> the protected-mode groundwork is now in `main` and regression-green. Next up is
-> the DPMI host — the numbered TODO at the end.
+> **All work is on `main`.** Protected mode and the DPMI host are in and
+> regression-green: 32-bit DJGPP programs load and run. The one thing missing is
+> **argv** — see "The gap: argc == 0". That is where to pick up.
 
 ## State (all verified, on the browser build too)
 
-A 16-bit real-mode 8086 MS-DOS emulator in C++/WebAssembly.
+An 8086/80386 MS-DOS emulator in C++/WebAssembly — 16-bit real mode, plus 32-bit
+protected mode with a built-in DPMI host for DOS-extended programs.
 
 - **8086 core** (`src/cpu.cpp`): integer subset + string ops + shifts + MUL/DIV;
   x87 escapes (D8-DF) are consumed as no-ops (LSI C uses software float). A runaway
@@ -59,11 +59,11 @@ LSS/LFS/LGS, CPUID/RDTSC stubs); and the system instructions that arm the mode
 switch (MOV CRn/DRn, LGDT/LIDT/SGDT/SIDT, LMSW/SMSW, LLDT/LTR, CLTS) writing new
 `cr[]`/`dr[]`/`gdt_*`/`idt_*`/`ldtr`/`tr` state in cpu.h.
 
-**Validated with real extender code** (probe: temporarily no-op the `is_djgpp_coff`
-bail in `loader.cpp`, build, run): the go32 stub and the DOS/4GW stub both now run
-all the way through their real-mode setup and stop exactly at the DPMI check —
-DJGPP prints `no DPMI - Get csdpmi*b.zip`, DOS/4GW prints `Can't run DOS/4G(W)`.
-The old `0x66` fault is gone. So the CPU is ready; what's missing is the mode switch.
+**Validated with real extender code**: with no DPMI host present, the go32 and DOS/4GW
+stubs ran their whole real-mode setup and stopped exactly at the DPMI check — DJGPP
+printing `no DPMI - Get csdpmi*b.zip`, DOS/4GW `Can't run DOS/4G(W)`. That was the
+milestone at the time; the host below now answers that check. If a future CPU change
+breaks 32-bit real-mode code, reaching *those* messages is still the right first test.
 
 ### DONE — protected-mode groundwork (merged to `main`, regression-clean)
 
@@ -125,13 +125,8 @@ network and no extractor; the optional `djgpp` argument additionally downloads
 needs CRLF endings *and* a literal `\n` in the source, and getting that wrong yields
 `missing "` from the LSI C front end instead of anything informative.
 
-**`DOSEMU_RUNSTUB=1` runs a DJGPP/DOS-4GW stub instead of refusing it** (`loader.cpp`).
-This is the only 32-bit-heavy code available to test the CPU against before the DPMI host
-exists, so it is now a documented switch rather than a temporary source edit. Expected
-output today — anything *earlier* than these is a CPU bug:
-
-    DOSEMU_RUNSTUB=1 ./dosemu --root scratch_root scratch_root/DJECHO.EXE
-    -> no DPMI - Get csdpmi*b.zip
+**DJGPP programs need no special flag** — the loader's refusal is gone, since they run.
+`DOSEMU_DPMI_TRACE=1` logs the whole DPMI conversation.
 
 **The DJGPP fixture** (`djgpp/bin/djecho.exe` from djdev205, 97792 bytes) parses with
 `src/coff_loader.cpp` as: entry `0x18B0`, text base `0x18A8`, and
@@ -146,32 +141,86 @@ Scratch fixtures (gitignored): `scratch_root/` = a drive with `LSIC86/`, `PROG.C
 `COMMAND.COM`; build with `cc.sh ... -Fe:dosemu.exe`; run
 `./dosemu.exe --root scratch_root scratch_root/LSIC86/BIN/LCC.EXE PROG.C`.
 
-### TODO — after the regression is fixed: the DPMI host
+### DONE — the DPMI host: 32-bit DJGPP programs run
 
-1. **Bigger address space.** `Memory` is 1 MiB flat. Protected-mode flat clients
-   address many MB. Add extended RAM (e.g. 16 MB) reachable by *physical* 32-bit
-   address; real mode keeps using the low 1 MiB. (This is the first concrete step.)
-2. **Protected mode.** Selector→descriptor {base,limit,flags} from GDT/LDT; when
-   `cr[0]&PE`, segment access is `base+offset` (32-bit) not `seg<<4`. Instruction
-   fetch and stack switch to the descriptor model. The system instrs above already
-   load the tables.
-3. **DPMI host — build our own, don't run CWSDPMI.** Intercept `INT 2Fh AX=1687h` →
-   return present (CF=0), 32-bit capable (BX bit0), CPU=3, ver 0.90, SI=0 paras
-   needed, `ES:DI` = a real-mode entry we recognise. When the stub far-calls it,
-   perform the real→protected switch ourselves. Then service `INT 31h`: descriptor
-   alloc/free (`0000/0001`), set base/limit (`0007/0008`), alloc LDT selectors,
-   allocate memory (`0501`), get/set exception & PM interrupt vectors, real-mode
-   callbacks, and **simulate real-mode interrupt (`0300`)** so the client's DOS/BIOS
-   calls reflect back into the existing 16-bit DOS layer (with 32-bit regs).
-4. **Image load.** DJGPP: map COFF `.text`/`.data`, zero `.bss` (`coff_loader.cpp`),
-   flat 4 GB CS/DS/SS/ES/FS/GS selectors, jump to `entry`. OpenWatcom: write an LE
-   loader (objects → pages, relocations/fixups) and hand DOS/4GW's own extender
-   code protected mode via our DPMI host (it becomes a DPMI *client*, same path).
-5. **Reuse the DOS layer** for I/O via `0300` reflection. Also add INT 21h **AH=31h**
-   (TSR) — the go32 stub calls it during DPMI setup (seen in the probe).
+`src/dpmi.{h,cpp}`. A DJGPP `.EXE` now goes down the ordinary MZ path: the go32 stub is
+plain 16-bit code, it finds our host, switches to protected mode, loads its own COFF and
+jumps into it. No special-casing left in the loader.
 
-Test order: `djecho.exe` (tiny COFF) → prove protected mode + DPMI + COFF; then the
-LE loader → `wcl hello.c` (OpenWatcom parity with the LSI C demo); then scale toward
+    ./dosemu --root scratch_root scratch_root/stubify.exe
+    ./dosemu --root scratch_root scratch_root/dtou.exe
+    -> the 32-bit program's own usage text
+
+How it fits together:
+
+- **INT 2Fh AX=1687h** answers "present, 32-bit capable, 386, v0.90, 0 paragraphs
+  needed" and returns a real-mode far address at segment `0x00E0` — a paragraph nothing
+  else uses (IVT/BIOS end at 0x0500, the environment sits at 0x00F0, programs load from
+  0x0100). `Cpu::pm_switch_addr` traps that linear address instead of executing it.
+- **The switch** pulls the far-call return address off the real-mode stack, builds four
+  16-bit descriptors over the client's current CS/DS/ES/SS, sets `cr0.PE`, and resumes
+  at the return address with CS reloaded as a selector.
+- **Descriptors** live in an LDT at linear `0x00110000`; `0501h` hands out extended
+  memory from 2 MiB up with a bump allocator.
+- **`0300h` (simulate real-mode interrupt) is the hinge.** It drops the CPU to real mode
+  for the duration of the call, loads the client's 50-byte frame into the registers, and
+  calls the *existing* DOS layer. Because `dos.cpp` reads its arguments as
+  segment:offset, every INT 21h handler works unmodified — there is no second,
+  protected-mode-aware copy of the DOS layer, and there does not need to be.
+  `Cpu::save()`/`restore()` (new, in cpu.h) puts the client's world back afterwards:
+  saving the registers alone is not enough once cr0/cs_d/ip_mask/sbase decide how those
+  registers are read.
+- **`LAR`/`LSL` (`0F 02`/`0F 03`)** were added to the CPU. DJGPP's startup runs `LSL`
+  within a few instructions of its entry to size the segment it was given.
+- **`INT 21h AH=50h/51h/62h`** (set/get PSP) were missing. Nothing 16-bit ever asked —
+  a .COM or .EXE gets DS=ES=PSP at entry and keeps it — but an extender reloads the
+  segment registers and has to ask. The no-op default returned success with BX
+  untouched, which is the kind of "success but blank" answer the FreeCOM lesson at the
+  bottom of this file warns about.
+
+Watch one run with `DOSEMU_DPMI_TRACE=1`: it logs every INT 31h call and, for each
+reflected interrupt, the DOS function and the bytes of any write.
+
+**⏭ The gap: `argc == 0`.** Programs run and produce their own output, but get no
+arguments — `dtou` prints `Usage:  [-b] ...` with an empty `argv[0]`, and `djecho hello
+world` prints a bare newline. Both the command tail *and* the environment are missing,
+not just one, so the client's view of the PSP is wrong rather than the tail being
+malformed — and the 16-bit path is fine (`LCC.EXE PROG.C` parses its tail correctly), so
+the PSP itself is built right. Ruled out: `AH=62h` (the stub never calls it; implemented
+anyway), and `_dos_ds` (the client builds it as selector `0x4C`, base 0, limit
+`0x110FFF`, which addresses the PSP at linear `0x1080` correctly).
+
+Next step, and do this before theorising further: find *where* the client reads the PSP.
+`_go32_info_block.linear_address_of_original_psp` is filled in by the stub before the
+mode switch, from plain real-mode memory reads that leave no trace — so the way to see
+it is a watchpoint on reads of linear `0x1000`–`0x10FF`, or dumping the stub info
+structure once the client has built it.
+
+**Also unimplemented, and harmless so far** — every DJGPP program opens with
+`Warning: Coprocessor not present and DPMI setup failed!`. That is exactly two missing
+functions: `0303h` (allocate real-mode callback), used to hook the FPU emulator, and
+`0E01h` (set coprocessor emulation). The x87 escapes are still no-ops in the CPU, so
+this only matters for a program that does floating point. `0507h` also fails; it is a
+DPMI 1.0 function the client merely probes.
+
+### TODO — the rest of the extender work
+
+1. ✅ Bigger address space (16 MiB), ✅ protected mode, ✅ DPMI host, ✅ COFF load —
+   all above. Note the COFF loading is done by **go32 itself**, not by us:
+   `src/coff_loader.cpp` parses an image but nothing calls it on the run path. It stays
+   useful for inspecting a binary, and for the OpenWatcom LE work below.
+2. **Fix `argc == 0`** (see above). Until this is done, a DJGPP program can only do
+   what it does with no arguments, so nothing built on top of it is worth trying.
+3. **The FPU.** `0303h` + `0E01h` to silence the startup warning, and eventually real
+   x87 instead of no-op D8-DF escapes, for anything that computes.
+4. **OpenWatcom / DOS/4GW.** An MZ + **LE** image (`ow/binw/wcc.exe`, string `"DOS/4G"`
+   at `e_lfanew`). Unlike DJGPP, the extender is not a thin stub — DOS/4GW is a full
+   extender that becomes a *client* of our DPMI host. Needs an LE loader (objects →
+   pages, fixups). `wcl.exe` is a plain 16-bit driver that just spawns the others.
+5. **INT 21h AH=31h** (TSR) — the go32 stub calls it during DPMI setup.
+
+Test order: ✅ `djecho.exe` proved protected mode + DPMI + COFF; then argv; then the LE
+loader → `wcl hello.c` (OpenWatcom parity with the LSI C demo); then scale toward
 FreeCOM's full `wmake` build. Keep LSI C + FreeCOM green throughout (`node
 web/test_shell.mjs`, native `LCC.EXE PROG.C`).
 

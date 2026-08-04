@@ -9,13 +9,22 @@
 #include "cpu.h"
 #include "memory.h"
 #include "files.h"
+#include "dpmi.h"
 
 namespace dosemu {
 
 class Dos {
 public:
-    Dos(Cpu& cpu, Memory& mem, std::string root = ".") : cpu_(cpu), mem_(mem), files_(std::move(root)) {
+    Dos(Cpu& cpu, Memory& mem, std::string root = ".")
+        : cpu_(cpu), mem_(mem), files_(std::move(root)), dpmi_(cpu, mem) {
         cpu_.on_int = [this](uint8_t n) { return handle(n); };
+        // INT 31h function 0300h and DOS calls made from protected mode both need to
+        // land back in this handler, so the DPMI host reflects through it.
+        dpmi_.real_int = [this](uint8_t n) { return handle(n); };
+        dpmi_.alloc_dos = [this](uint16_t paras) -> uint16_t {
+            if (heap_next_ + paras > heap_end_) return 0;
+            uint16_t seg = heap_next_; heap_next_ += paras; return seg;
+        };
     }
 
     // Guest output (fd 1/2) goes here; defaults to stdout/stderr.
@@ -33,6 +42,7 @@ private:
     Cpu& cpu_;
     Memory& mem_;
     DosFiles files_;
+    Dpmi dpmi_;
 
     std::string read_asciiz(uint16_t seg, uint16_t off) {
         std::string s;

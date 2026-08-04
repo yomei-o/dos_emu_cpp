@@ -47,23 +47,15 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
     build_env(mem, dos_name);
     build_psp(mem, psp_seg, cmdline);
 
-    // A DJGPP program is a real-mode DOS stub (go32) wrapping an i386 COFF image; an
-    // OpenWatcom DOS program is the same idea with a DOS/4GW stub wrapping an LE image.
-    // Running either needs 32-bit protected mode + a DPMI host, which is the next
-    // milestone (see resume.md), so refuse up front with an explanation instead of
-    // dying somewhere inside the stub.
+    // A DJGPP program is a real-mode DOS stub (go32) wrapping an i386 COFF image, and
+    // it no longer needs special handling: the stub is ordinary 16-bit code, it finds
+    // the built-in DPMI host (src/dpmi.cpp), switches to protected mode, loads the COFF
+    // itself and jumps into it. So it goes down the normal MZ path below.
     //
-    // DOSEMU_RUNSTUB=1 skips this refusal and lets the stub run. That is the probe used
-    // to check the 386 real-mode core against real extender code: the stub should get
-    // all the way to its DPMI test and say so — `no DPMI - Get csdpmi*b.zip` for go32,
-    // `Can't run DOS/4G(W)` for DOS/4GW. Anything earlier is a CPU bug, and this is the
-    // only 32-bit-heavy code available to catch one before the DPMI host exists.
-    if (is_djgpp_coff(f) && !getenv("DOSEMU_RUNSTUB")) {
-        err = "DJGPP 32-bit program (i386 COFF): the go32 stub runs but needs the "
-              "protected-mode + DPMI host, which is the next milestone (see resume.md). "
-              "The 16-bit DOS side works.";
-        return false;
-    }
+    // The one thing that does not work yet is argv — see resume.md. Detection is kept
+    // because the loader is where you would notice a 32-bit image, and DOSEMU_DPMI_TRACE
+    // is the way to watch one run.
+    (void)is_djgpp_coff;
 
     bool is_mz = f.size() >= 2 && f[0] == 'M' && f[1] == 'Z';
     if (is_mz) {
@@ -86,9 +78,12 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
             uint16_t cur = mem.rw(load_seg + rs, ro);
             mem.ww(load_seg + rs, ro, cur + load_seg);
         }
-        cpu.sreg[CS] = load_seg + cs; cpu.ip = ip;
-        cpu.sreg[SS] = load_seg + ss; cpu.r[SP] = sp;
-        cpu.sreg[DS] = psp_seg; cpu.sreg[ES] = psp_seg;
+        // set_seg, not a raw sreg[] write: it also refreshes the descriptor cache and
+        // the code segment's width. Identical in real mode, but a raw write leaves
+        // sbase[] stale, and protected mode reads sbase[].
+        cpu.set_seg(CS, load_seg + cs); cpu.ip = ip;
+        cpu.set_seg(SS, load_seg + ss); cpu.r[SP] = sp;
+        cpu.set_seg(DS, psp_seg); cpu.set_seg(ES, psp_seg);
         (void)err;
         return true;
     }
@@ -96,7 +91,7 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
     // .COM: flat load at PSP:0x100, all segment registers = PSP, SP at top of segment.
     if (f.size() > 0xFF00) { err = "COM image too large"; return false; }
     mem.write(Memory::phys(psp_seg, 0x100), f.data(), static_cast<uint32_t>(f.size()));
-    cpu.sreg[CS] = cpu.sreg[DS] = cpu.sreg[ES] = cpu.sreg[SS] = psp_seg;
+    for (int s : {CS, DS, ES, SS}) cpu.set_seg(s, psp_seg);
     cpu.ip = 0x100;
     cpu.r[SP] = 0xFFFE;
     mem.ww(psp_seg, 0xFFFE, 0x0000);   // a return address (INT 20h at PSP:0)

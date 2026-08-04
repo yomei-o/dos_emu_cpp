@@ -71,6 +71,24 @@ public:
         if (pe()) return sbase[s] + off;
         return ((static_cast<uint32_t>(sreg[s]) << 4) + off) & 0xFFFFF;
     }
+    // A decoded GDT/LDT descriptor. `ar` is the access-rights byte (descriptor byte 5)
+    // and `hi` the flags nibble (byte 6), which is what LAR reports.
+    struct Desc { uint32_t base, limit; uint8_t ar, hi; bool big, present; };
+    Desc read_desc(uint16_t sel) const {
+        const uint32_t tbl = (sel & 4) ? ldt_base : gdt_base;
+        const uint32_t da = tbl + (sel & ~7u);
+        Desc d{};
+        d.base = mem_.r16(da + 2) | (static_cast<uint32_t>(mem_.r8(da + 4)) << 16)
+               | (static_cast<uint32_t>(mem_.r8(da + 7)) << 24);
+        d.ar = mem_.r8(da + 5);
+        d.hi = mem_.r8(da + 6);
+        d.limit = mem_.r16(da) | ((d.hi & 0x0Fu) << 16);
+        if (d.hi & 0x80) d.limit = (d.limit << 12) | 0xFFF;    // 4 KiB granularity
+        d.big = (d.hi & 0x40) != 0;
+        d.present = (d.ar & 0x80) != 0;
+        return d;
+    }
+
     // Load a segment register. In protected mode this reads the descriptor from the
     // GDT/LDT into the cache; in real mode base is just selector<<4.
     void set_seg(int i, uint16_t sel) {
@@ -79,18 +97,10 @@ public:
                      if (i == CS) { cs_d = false; ip_mask = 0xFFFFu; }
                      if (i == SS) ss_d = false;
                      return; }
-        uint32_t tbl = (sel & 4) ? ldt_base : gdt_base;
-        uint32_t da = tbl + (sel & ~7u);
-        uint32_t limlo = mem_.r16(da);
-        uint32_t base = mem_.r16(da + 2) | (static_cast<uint32_t>(mem_.r8(da + 4)) << 16)
-                        | (static_cast<uint32_t>(mem_.r8(da + 7)) << 24);
-        uint8_t g = mem_.r8(da + 6);
-        uint32_t lim = limlo | ((g & 0x0F) << 16);
-        if (g & 0x80) lim = (lim << 12) | 0xFFF;
-        sbase[i] = base; slimit[i] = lim;
-        bool big = (g & 0x40) != 0;
-        if (i == CS) { cs_d = big; ip_mask = big ? 0xFFFFFFFFu : 0xFFFFu; }
-        if (i == SS) ss_d = big;
+        const Desc d = read_desc(sel);
+        sbase[i] = d.base; slimit[i] = d.limit;
+        if (i == CS) { cs_d = d.big; ip_mask = d.big ? 0xFFFFFFFFu : 0xFFFFu; }
+        if (i == SS) ss_d = d.big;
     }
 
     // Every near control transfer goes through this: a 16-bit code segment wraps EIP at
@@ -120,6 +130,33 @@ public:
     // host performs the real→protected switch instead of executing an instruction.
     std::function<void()> on_pm_switch;
     uint32_t pm_switch_addr = 0xFFFFFFFFu;
+
+    // Everything an interruption has to preserve: the register file plus the mode and
+    // descriptor-cache state that says how those registers are interpreted. Saving the
+    // registers alone is not enough once protected mode exists — the DPMI host drops to
+    // real mode to service a reflected DOS call, and cr0/cs_d/ip_mask/sbase have to come
+    // back with the rest or the client resumes with real-mode addressing.
+    struct State {
+        uint16_t r[8], rhi[8], sreg[6];
+        uint32_t sbase[6], slimit[6];
+        uint32_t ip, cr0, ip_mask;
+        uint16_t flags;
+        bool cs_d, ss_d;
+    };
+    State save() const {
+        State s{};
+        for (int i = 0; i < 8; ++i) { s.r[i] = r[i]; s.rhi[i] = rhi[i]; }
+        for (int i = 0; i < 6; ++i) { s.sreg[i] = sreg[i]; s.sbase[i] = sbase[i]; s.slimit[i] = slimit[i]; }
+        s.ip = ip; s.cr0 = cr[0]; s.ip_mask = ip_mask; s.flags = flags;
+        s.cs_d = cs_d; s.ss_d = ss_d;
+        return s;
+    }
+    void restore(const State& s) {
+        for (int i = 0; i < 8; ++i) { r[i] = s.r[i]; rhi[i] = s.rhi[i]; }
+        for (int i = 0; i < 6; ++i) { sreg[i] = s.sreg[i]; sbase[i] = s.sbase[i]; slimit[i] = s.slimit[i]; }
+        ip = s.ip; cr[0] = s.cr0; ip_mask = s.ip_mask; flags = s.flags;
+        cs_d = s.cs_d; ss_d = s.ss_d;
+    }
 
     void run();          // until halted
     void step();         // one instruction

@@ -159,8 +159,11 @@ bool Dos::handle(uint8_t n) {
             return true;
         }
         case 0x2F:                                       // DOS multiplex
+            if (dpmi_.int2f()) return true;               // AX=1687h: yes, DPMI is here
             if (cpu_.r[AX] == 0xAE00) cpu_.sb(AX, 0);     // no installable-command extension
             return true;
+        case 0x31:                                       // DPMI services (protected mode)
+            return dpmi_.int31();
         case 0x10:                                       // BIOS video — accept and ignore
         case 0x1A:                                       // BIOS time
             return true;
@@ -435,6 +438,15 @@ bool Dos::int21() {
             cpu_.flags &= ~CF; return true;
         }
         case 0x49: cpu_.flags &= ~CF; return true;                  // free memory: accept (bump never frees)
+        // Get/set the current PSP. Nothing 16-bit here ever asked, because a .COM or
+        // .EXE is handed DS=ES=PSP at entry and just keeps it. A DOS extender cannot:
+        // it reloads the segment registers to switch modes, so it asks — and until
+        // this existed the call fell through to the no-op default, which returns
+        // success with BX untouched. The stub then believed the PSP was wherever BX
+        // happened to point and read an empty command tail from it, which is why
+        // every DJGPP program started with argc == 0.
+        case 0x51: case 0x62: cpu_.r[BX] = psp_seg; return true;    // get PSP -> BX
+        case 0x50: psp_seg = cpu_.r[BX]; return true;               // set PSP
         case 0x4A: {                                                // resize block (ES:block, BX paragraphs)
             // A startup shrink to free memory for children always succeeds; a grow
             // is granted up to the arena, which is all the guest needs here.
