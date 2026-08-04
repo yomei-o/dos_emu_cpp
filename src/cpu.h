@@ -1,11 +1,15 @@
-// An 8086/80386 real-mode interpreter. The low 16 bits of each general register
-// live in r[]; the upper 16 bits (for the 386's EAX..EDI) live in the parallel
-// rhi[]. 16-bit instructions touch only r[], so they preserve the upper halves the
-// way a real 386 does — the working 16-bit paths stay byte-for-byte unchanged, and
-// the 0x66/0x67 prefixes select 32-bit operand/address size on top. INT n is handed
-// to a callback so the DOS/BIOS layer can service it. Protected mode is not entered
-// yet, but the system registers below are populated by LGDT/LMSW/MOV CRn so the
-// mode switch (for DPMI/DOS-extender guests) can be wired up next.
+// An 8086/80386 interpreter with real mode and (for DPMI / DOS-extender guests)
+// 32-bit protected mode. The low 16 bits of each general register live in r[]; the
+// upper 16 bits (EAX..EDI) live in the parallel rhi[], so 16-bit instructions touch
+// only r[] and preserve the upper halves the way a real 386 does — the 16-bit paths
+// stay byte-for-byte unchanged. The 0x66/0x67 prefixes select 32-bit operand/address
+// size on top (relative to the code segment's default size).
+//
+// Addressing goes through lin(): in real mode a segment is base = value<<4; in
+// protected mode (cr0.PE) it is the cached descriptor base loaded by set_seg() from
+// the GDT/LDT. Real-mode paths compute the same (value<<4)+offset as before, so
+// enabling protected mode does not disturb them. INT n is handed to a callback (the
+// DOS/BIOS layer, and the DPMI host in protected mode).
 #pragma once
 #include <cstdint>
 #include <functional>
@@ -34,19 +38,65 @@ public:
 
     uint16_t r[8] = {0};       // low 16 bits of AX,CX,DX,BX,SP,BP,SI,DI
     uint16_t rhi[8] = {0};     // upper 16 bits (EAX..EDI); 16-bit ops leave these alone
-    uint16_t sreg[6] = {0};    // ES,CS,SS,DS,FS,GS
-    uint16_t ip = 0;
+    uint16_t sreg[6] = {0};    // ES,CS,SS,DS,FS,GS (selector values)
+    uint32_t ip = 0;           // 16- or 32-bit instruction pointer
     uint16_t flags = 0x0002;   // bit 1 is always set on the 8086
     bool halted = false;
     int exit_code = 0;
 
-    // 386 system registers. Populated by the protected-mode/system instructions;
-    // the mode switch that consumes them is the next milestone (see resume.md).
+    // 386 system + protected-mode state.
     uint32_t cr[8] = {0};
     uint32_t dr[8] = {0};
-    uint32_t gdt_base = 0, idt_base = 0;
+    uint32_t gdt_base = 0, idt_base = 0, ldt_base = 0;
     uint16_t gdt_limit = 0, idt_limit = 0;
     uint16_t ldtr = 0, tr = 0;
+    // Descriptor cache: base/limit per segment register, and the default-size (D/B)
+    // bits for CS and SS. Maintained by set_seg(); only consulted in protected mode.
+    uint32_t sbase[6] = {0};
+    uint32_t slimit[6] = {0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF};
+    bool cs_d = false, ss_d = false;
+    // How wide the instruction pointer is *in the current code segment*. When ip was a
+    // uint16_t this was implicit: every ip += rel wrapped inside the 64 KiB segment, which
+    // is what a 16-bit code segment does. Widening ip to 32 bits silently removed that, so
+    // a backward branch from a low offset became 0xFFFFxxxx and the linear address landed
+    // 64 KiB below the segment — in zeroed memory. Every write to ip goes through this
+    // mask; it is 0xFFFFFFFF only inside a D=1 (32-bit) code segment.
+    uint32_t ip_mask = 0xFFFFu;
+
+    bool pe() const { return (cr[0] & 1) != 0; }
+    // Linear address for a segment index + offset. Real mode wraps at 1 MiB exactly
+    // as the old segment:offset arithmetic did; protected mode uses the descriptor
+    // base into the full extended address space.
+    uint32_t lin(int s, uint32_t off) const {
+        if (pe()) return sbase[s] + off;
+        return ((static_cast<uint32_t>(sreg[s]) << 4) + off) & 0xFFFFF;
+    }
+    // Load a segment register. In protected mode this reads the descriptor from the
+    // GDT/LDT into the cache; in real mode base is just selector<<4.
+    void set_seg(int i, uint16_t sel) {
+        sreg[i] = sel;
+        if (!pe()) { sbase[i] = static_cast<uint32_t>(sel) << 4; slimit[i] = 0xFFFF;
+                     if (i == CS) { cs_d = false; ip_mask = 0xFFFFu; }
+                     if (i == SS) ss_d = false;
+                     return; }
+        uint32_t tbl = (sel & 4) ? ldt_base : gdt_base;
+        uint32_t da = tbl + (sel & ~7u);
+        uint32_t limlo = mem_.r16(da);
+        uint32_t base = mem_.r16(da + 2) | (static_cast<uint32_t>(mem_.r8(da + 4)) << 16)
+                        | (static_cast<uint32_t>(mem_.r8(da + 7)) << 24);
+        uint8_t g = mem_.r8(da + 6);
+        uint32_t lim = limlo | ((g & 0x0F) << 16);
+        if (g & 0x80) lim = (lim << 12) | 0xFFF;
+        sbase[i] = base; slimit[i] = lim;
+        bool big = (g & 0x40) != 0;
+        if (i == CS) { cs_d = big; ip_mask = big ? 0xFFFFFFFFu : 0xFFFFu; }
+        if (i == SS) ss_d = big;
+    }
+
+    // Every near control transfer goes through this: a 16-bit code segment wraps EIP at
+    // 64 KiB, a 32-bit one does not. Far transfers set CS first, so the new segment's
+    // width is already in ip_mask by the time they land here.
+    void jump(uint32_t v) { ip = v & ip_mask; }
 
     // Byte-register access (AL/CL/DL/BL/AH/CH/DH/BH by ModRM index 0..7).
     uint8_t  gb(int i) const { return i < 4 ? (r[i] & 0xFF) : (r[i - 4] >> 8); }
@@ -55,9 +105,21 @@ public:
     uint32_t gd(int i) const { return (static_cast<uint32_t>(rhi[i]) << 16) | r[i]; }
     void     sd(int i, uint32_t v) { r[i] = static_cast<uint16_t>(v); rhi[i] = static_cast<uint16_t>(v >> 16); }
 
+    // Stack pointer honours the SS default-size (B) bit in protected mode.
+    uint32_t sp_get() const { return (pe() && ss_d) ? gd(SP) : r[SP]; }
+    void     sp_set(uint32_t v) { if (pe() && ss_d) sd(SP, v); else r[SP] = static_cast<uint16_t>(v); }
+    void push16(uint16_t v) { sp_set(sp_get() - 2); mem_.w16(lin(SS, sp_get()), v); }
+    uint16_t pop16() { uint16_t v = mem_.r16(lin(SS, sp_get())); sp_set(sp_get() + 2); return v; }
+    void push32(uint32_t v) { sp_set(sp_get() - 4); mem_.w32(lin(SS, sp_get()), v); }
+    uint32_t pop32() { uint32_t v = mem_.r32(lin(SS, sp_get())); sp_set(sp_get() + 4); return v; }
+
     // INT n service: the handler inspects/updates registers. Return false to let
     // the CPU fall through to the (usually unused) real IVT behaviour.
     std::function<bool(uint8_t)> on_int;
+    // The DPMI mode-switch entry: when execution reaches this linear address, the
+    // host performs the real→protected switch instead of executing an instruction.
+    std::function<void()> on_pm_switch;
+    uint32_t pm_switch_addr = 0xFFFFFFFFu;
 
     void run();          // until halted
     void step();         // one instruction
@@ -67,22 +129,17 @@ public:
     uint64_t insns = 0;
     uint64_t max_insns = 0;   // 0 = unlimited; otherwise stop with an error (runaway guard)
 
+    void set_flag(uint32_t f, bool on) { if (on) flags |= f; else flags &= ~f; }
+    bool get_flag(uint32_t f) const { return (flags & f) != 0; }
+
 private:
     Memory& mem_;
 
-    // instruction fetch
-    uint8_t  fetch8()  { return mem_.rb(sreg[CS], ip++); }
-    uint16_t fetch16() { uint16_t v = mem_.rw(sreg[CS], ip); ip += 2; return v; }
-    uint32_t fetch32() { uint32_t v = mem_.rd(sreg[CS], ip); ip += 4; return v; }
-
-    // stack (real-mode: SP is the 16-bit offset into SS)
-    void push16(uint16_t v) { r[SP] -= 2; mem_.ww(sreg[SS], r[SP], v); }
-    uint16_t pop16() { uint16_t v = mem_.rw(sreg[SS], r[SP]); r[SP] += 2; return v; }
-    void push32(uint32_t v) { r[SP] -= 4; mem_.wd(sreg[SS], r[SP], v); }
-    uint32_t pop32() { uint32_t v = mem_.rd(sreg[SS], r[SP]); r[SP] += 4; return v; }
-
-    void set_flag(uint32_t f, bool on) { if (on) flags |= f; else flags &= ~f; }
-    bool get_flag(uint32_t f) const { return (flags & f) != 0; }
+    // Instruction fetch (via lin() so it follows the code segment's base). The advance is
+    // masked for the same reason as jump(): in a 16-bit segment ip wraps at 0xFFFF.
+    uint8_t  fetch8()  { uint8_t v = mem_.r8(lin(CS, ip)); ip = (ip + 1) & ip_mask; return v; }
+    uint16_t fetch16() { uint16_t v = mem_.r16(lin(CS, ip)); ip = (ip + 2) & ip_mask; return v; }
+    uint32_t fetch32() { uint32_t v = mem_.r32(lin(CS, ip)); ip = (ip + 4) & ip_mask; return v; }
 
     [[noreturn]] void fail(const std::string& msg, uint8_t op);
 };

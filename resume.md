@@ -67,7 +67,68 @@ all the way through their real-mode setup and stop exactly at the DPMI check —
 DJGPP prints `no DPMI - Get csdpmi*b.zip`, DOS/4GW prints `Can't run DOS/4G(W)`.
 The old `0x66` fault is gone. So the CPU is ready; what's missing is the mode switch.
 
-### TODO — protected mode + built-in DPMI host (the next milestone)
+### DONE — protected-mode groundwork (branch `wip-pmode-dpmi`, regression fixed)
+
+The protected-mode CPU groundwork is in and the LSI C regression that parked it is
+**fixed** (see below). All three headless tests and the native compile-and-run pass.
+What the branch changes (src/cpu.h, src/cpu.cpp, src/memory.h only):
+
+- **Memory → 16 MiB** (`memory.h`): `kSize=0x1000000`, `kMask`; low 1 MiB is real
+  mode, above is extended (protected-mode linear). `phys()` still masks real mode to
+  1 MiB. `rd`/`wd` seg:off helpers added.
+- **`ip` widened to 32-bit**; `sreg[6]` (FS/GS); descriptor cache `sbase[6]`,
+  `slimit[6]`, `cs_d`/`ss_d`; system regs `cr[]`,`dr[]`,`gdt_*`,`idt_*`,`ldt_base`,
+  `ldtr`,`tr`. `pe()`, `lin(seg,off)` (real mode wraps at 1 MiB exactly as before;
+  PE uses `sbase+off`), `set_seg()` (loads a GDT/LDT descriptor in PE, `sel<<4` in
+  real mode), stack-size-aware `sp_get/sp_set`/push/pop, `on_pm_switch`/`pm_switch_addr`
+  hook (reaching that linear addr runs the DPMI mode switch instead of an instruction).
+- **`cpu.cpp`**: ModRM now yields a segment *index* (`seg_idx`) and `pa()=lin()`;
+  all segment loads/far transfers go through `set_seg`; string ops/moffs are
+  address-size aware; effective `o32/a32 = prefix ^ cs_d`.
+
+**The regression, and what it actually was.** Symptom: native `LCC.EXE PROG.C` failed
+with `cg: can't open: 2.$$$` because CF crashed after ~640 instructions — an `E8`
+near-CALL at `3010:0321` landing in zeroed memory.
+
+Cause: **widening `ip` from `uint16_t` to `uint32_t` deleted an invariant nobody had
+written down.** While `ip` was 16 bits, every `ip += rel` wrapped inside the 64 KiB
+segment for free — which is exactly what a 16-bit code segment does. As a `uint32_t`
+it no longer wrapped, so a backward branch from a low offset produced `0xFFFF9708`
+instead of `0x9708`, and `lin(CS, ip)` — which adds `CS<<4` and masks to 20 bits —
+turned that into a linear address **exactly 64 KiB below** the intended one. Reading
+zeros there was a symptom two steps removed from the cause, which is why the earlier
+diagnosis (a stray write zeroing code) pointed the wrong way. Note the trap: the
+address *looked* right when printed as `CS:IP` with IP truncated for display.
+
+Fix: `Cpu::ip_mask` (`0xFFFF` in a 16-bit code segment, `0xFFFFFFFF` when the CS
+descriptor has D=1), maintained by `set_seg`, applied by `Cpu::jump()` and by the
+`fetch*` advance. Every near transfer — Jcc short and near, `E8`/`E9`/`EB`, LOOP*/
+JCXZ, `C2`/`C3`, `FF /2`, `FF /4` — goes through `jump()`; the far ones (`EA`, `9A`,
+`CA`, `CB`, `CF`, `FF /3`, `FF /5`, and `interrupt()`) now load CS **before** jumping,
+so the new segment's width is already in `ip_mask`. Drive-by: `FF /2` (CALL near rm)
+now reads its target before pushing, which matters once an operand can be ESP-relative.
+
+**The general lesson** (this is the second time on this project): a refactor that
+widens a type silently deletes whatever the narrow type was enforcing. `uint16_t ip`
+was not a storage choice, it was the 16-bit-segment wrap rule. Same shape as the
+FreeCOM NLS lesson below — the code was *more correct* in the narrow case by accident,
+and making it general removed the accident without replacing it.
+
+Verified: `LCC.EXE PROG.C` → `PROG.exe` → `sum=55`; `node web/test_shell.mjs`
+(SHELL DEMO OK), `web/test_bundle.mjs` (BUNDLE OK), `web/test_node.mjs` (DOS + LSI C
+IN WASM OK) after rebuilding `web/dosemu.js`.
+
+**Fixture note for a fresh clone:** `lsic/`, `scratch_root/` and `fdos/` are gitignored
+and absent, but `web/lsic.tar.gz` **is committed** and contains the whole LSI C tree
+plus `COMMAND.COM`. So: `mkdir -p scratch_root && tar xzf web/lsic.tar.gz -C scratch_root`
+and `cp -r scratch_root/LSIC86 lsic` reconstitutes everything the tests need — no LZH
+extractor required.
+
+Scratch fixtures (gitignored): `scratch_root/` = a drive with `LSIC86/`, `PROG.C`,
+`COMMAND.COM`; build with `cc.sh ... -Fe:dosemu.exe`; run
+`./dosemu.exe --root scratch_root scratch_root/LSIC86/BIN/LCC.EXE PROG.C`.
+
+### TODO — after the regression is fixed: the DPMI host
 
 1. **Bigger address space.** `Memory` is 1 MiB flat. Protected-mode flat clients
    address many MB. Add extended RAM (e.g. 16 MB) reachable by *physical* 32-bit
