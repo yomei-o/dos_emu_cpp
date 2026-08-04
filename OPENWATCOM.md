@@ -198,14 +198,34 @@ layout from what it sees. Ours has no chain — `AH=52h` returns a well-formed s
 with an empty SFT list and nothing else — so it plans against a memory map that is not
 the one it will get.
 
-That is a well-shaped next piece rather than a mystery, and the block list is most of it
-already: one MCB per block, `'M'`/`'Z'` signature, owner PSP and size, written at
-`seg-1` in guest memory, with the first-MCB pointer at `LoL-2`. Two things to get right:
-`mem_alloc` must reserve the extra paragraph each MCB occupies (a block of N paragraphs
-costs N+1), and the top-level program's MCB at `00FF` collides with the end of the
-environment block at `00F0`, so that moves down. Note also that a *lone* fake MCB was
-tried early on, for the environment block alone, and broke FreeCOM completely — a
-partial chain is worse than none, so this is all-or-nothing.
+**That chain has been written, on the branch `wip-mcb-chain`, and it moves the wall.**
+One MCB per block in the paragraph below the segment the guest is given (so a block of N
+paragraphs costs N+1), `'M'`/`'Z'` signature, owner PSP and size, republished after every
+change, with the first MCB's segment at `LoL-2`. With it, DOS/4GW stops failing the
+memory dance, calls our DPMI host, switches to 32-bit protected mode, runs two *billion*
+instructions of its own startup, and stops on exactly two functions we do not have:
+
+    int31 AX=0305 -> FAIL 8001    get save-state addresses
+    int31 AX=0306 -> FAIL 8001    get raw CPU mode-switch addresses
+
+(`0A00h`, get vendor API entry, also fails; that one is normal — clients probe it.) So
+the linker's remaining cost is those two DPMI functions, which is a smaller and much
+better-specified job than the chain was.
+
+It is on a branch and not on `main` because **it costs the shell demo**: FreeCOM stops
+finding its own NLS strings and prompts for the location of `COMMAND.COM`. The cause is
+understood. The top-level environment block is built at a fixed low segment, *outside*
+the arena, so it has no MCB — and once the chain is real, a shell that trusts MCBs
+validates the environment block against one and finds garbage. This is the third time
+FreeCOM has been the thing that notices a half-truth about memory (the first was a lone
+fake MCB for the environment block alone, which left it answering "Bad command or
+filename" to everything), and it is the same lesson each time: a partial chain is worse
+than none.
+
+The fix is to allocate the top-level environment through `mem_alloc()` like every other
+block, which means `load_program()` stops choosing where it goes and takes it from the
+caller — a small refactor of `loader.cpp` plus `main.cpp` and `web/wasm_api.cpp`. Then
+the branch merges and the question becomes 0305h/0306h.
 
 The alternative, if the chain turns out to be a bad trade, is to stop using `wlink` and
 write the OMF linker ourselves; `src/coff_loader.cpp` is the model for the file parsing,
