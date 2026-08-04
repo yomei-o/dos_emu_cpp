@@ -34,9 +34,16 @@ uint32_t Cpu::watch_hi = [] { const char* s = getenv("DOSEMU_WATCH");
     return d ? (uint32_t)strtoul(d + 1, nullptr, 16) : 0u; }();
 
 void Cpu::trace_insn(uint8_t op) const {
-    printf("[t]%llu %04X:%08X %02X  eax=%08X ecx=%08X  esp=%08X(sp=%04X ss=%04X d=%d) ebp=%08X\n",
-           (unsigned long long)insns, sreg[CS], ip - 1, op,
-           gd(AX), gd(CX), gd(SP), r[SP], sreg[SS], ss_d ? 1 : 0, gd(BP));
+    // The instruction bytes as the guest sees them, so a trace can be read without
+    // guessing where the image was loaded. Disassembling a file at `header + EIP` is a
+    // reliable way to produce plausible nonsense; this cannot be wrong about what ran.
+    char by[32] = {0};
+    for (int i = 0; i < 8; ++i)
+        std::snprintf(by + i * 3, 4, "%02X ", mem_.r8(lin(CS, ip - 1 + i)));
+    printf("[t]%llu %04X:%08X %s| eax=%08X ecx=%08X ebx=%08X edx=%08X esp=%08X ebp=%08X\n",
+           (unsigned long long)insns, sreg[CS], ip - 1, by,
+           gd(AX), gd(CX), gd(BX), gd(DX), gd(SP), gd(BP));
+    (void)op;
 }
 
 void Cpu::watch_hit(uint32_t a, int s, uint32_t off) const {

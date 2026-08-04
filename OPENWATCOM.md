@@ -61,37 +61,40 @@ end-of-strings NUL, taking the count word and program name with it, so a faithfu
 of the parent's block has `$` but no name, and a rebuilt block has a name but no `$`.
 `make_child_env()` copies the strings and *regenerates* the name, keeping both.
 
-**Where it stops now, traced instruction by instruction.** W32RUN loads its own 32-bit
-part, switches to protected mode, and the 32-bit code runs about 230 instructions before
-exiting 0. The last 30 of them are unambiguous (`DOSEMU_TRACE=10196-10290`):
+**Where it stops, decoded.** `DOSEMU_TRACE` now prints the instruction bytes as the
+guest sees them, so this is read off the actual execution rather than guessed from a file
+offset. W32RUN's 32-bit part parses the command tail successfully — `mov eax,[0x09FA]`
+gives a pointer to `"hello.c"` and it skips spaces correctly — and then does this:
 
-    002B:0894  FF ...        -> 002B:0890  C3   ret
-    002B:089A  FF ...        -> 002B:0890  C3   ret
-    002B:08AC  FF ...        -> 002B:0890  C3   ret
-    002B:08B2  FF ...        -> 002B:0890  C3   ret
-    002B:08BA  E9  -> 01E9   push/pop, mov ah,4Ch, int 21h
+    06DB  A1 26 0A 00 00     mov eax, [0x0A26]     ; -> 0x6E6D, the environment copy
+    06ED  80 38 24           cmp byte [eax], '$'
+    06F0  75 09              jne  (next string)
+    06F4  80 78 01 3D        cmp byte [eax+1], '='
+    ...  scans string by string ...
+    0717  31 D0              xor eax, edx          ; not found -> 0
+    0719  EB 42              jmp 0x75D             ; return 0
 
-Four indirect calls in a row, every one of them through a pointer whose value is
-`0x890`, and `0x890` is a bare `ret`. Then it exits. Those are the emulator's own
-execution records, so unlike a guess at the file layout they are reliable.
+It is **looking for the `$=` variable and not finding it**, and the caller treats 0 as
+"nothing to do": four calls through the cleanup pointers at `0x0AC0`/`0x0AC4`/`0x0AC8`
+(all three holding `0x890`, a bare `ret`) and then `mov ah,4Ch; int 21h`.
 
-That reads like a table of initialisation or service routines in which **every slot
-holds the same do-nothing address** — either because it was never populated, or because
-the population depends on something we answered as "nothing available". Finding what
-fills that table is the next step, and it is the last unknown: the target path is
-delivered (`$`), the extender loads and enters protected mode, and it is executing real
-code when it gives up.
+So the target *is* delivered and the extender *is* looking for it in the right way. What
+is left is a copy: the environment block is read correctly — `DOSEMU_WATCH=48000-480a0`
+shows W32RUN reading it byte by byte at `3010:027C`, in real mode, and the block does
+contain `$=A:\BINW\WCC386.EXE` — but the pointer the 32-bit scanner starts from,
+`[0x0A26]` = `0x6E6D`, lands just above the stack pointer (`ESP` is `0x6E39` at that
+moment). Either the copy went somewhere else, or that pointer is stale.
 
-Two practical notes for whoever picks this up:
+**Next step, concretely:** trace around `3010:027C` with the byte-level tracer to see
+where the real-mode copy writes, then compare with `0x6E6D`. If they differ, the
+question becomes why — and the likeliest answer is a 16-bit/32-bit pointer mix-up on
+W32RUN's side that depends on something we set up differently.
 
-- **Do not disassemble W32RUN at `0x451 + EIP`.** `0x451` is the *file* offset of the
-  32-bit part; the image is loaded elsewhere and the EIPs are offsets into the loaded
-  image. Decoding at the file offset produces plausible-looking nonsense (it even yields
-  an `int 21h` near the right place, which is exactly how such a mistake survives). Get
-  the load address from the destination of the `AH=3Fh` read that pulls in those 0x4410
-  bytes, then disassemble relative to that.
-- The calls arrive from `CS=002B` with `SS=0033`, `d=1` — a 32-bit stack, so the
-  descriptors W32RUN built for itself are being read correctly.
+Worth knowing: **W32RUN never issues a single INT 31h call.** It asks `INT 2Fh
+AX=1687h` (twice — once from the stub, once from itself) and then enters protected mode
+on its own with `LGDT`/`LMSW`, under its own GDT. Our DPMI host is not involved in its
+operation at all, which also means `switch_to_pm()` never runs for it and the PSP
+environment field is never rewritten into a selector.
 
 ## Fixed on the way here
 
