@@ -259,6 +259,53 @@ that believes that issues the blocking read; DOS/4GW polls the keyboard during s
 stopped dead with no output at all, which is the hardest kind of hang to find because a
 process asleep in a read looks exactly like one wedged in a loop.
 
+### How DOS/4GW passes DOS calls down, and the one instruction that is wrong
+
+It does not use `0300h`, and it does not use the raw mode switch either. It reads the
+real-mode `INT 21h` vector out of the IVT itself and calls it as a procedure with an IRET
+frame — **INT 31h function 0302h**. We answered that with "unsupported", so its reflector
+reported failure for every DOS call it was asked to make, *including the seven writes
+carrying its own error message*. A program that cannot say why it is unhappy is the worst
+thing to debug, and we were the reason.
+
+0301h and 0302h are implemented now, and they differ from 0300h in a way that shapes the
+code: 0300h is serviced by the DOS layer, while these have to **run guest code and come
+back**. `rm_call()` drops to real mode with the frame's registers, pushes a return address
+the CPU hook recognises, and jumps; `rm_return()` writes the registers back and restores
+the client. One judgement call is in `load_frame()`: the frame's segment fields are meant
+to be real-mode paragraphs, and a client reflecting a call it received in protected mode
+sometimes copies its own segment registers in instead — DOS/4GW does, for the DS of a
+write. Where such a selector describes conventional memory at a paragraph boundary the two
+are the same address said two ways, so the frame load says it the way real mode needs.
+
+**Output flows for the first time**, and it is not yet readable. The message is
+
+    DOS/16M error: <29 bytes> '<18 bytes>'
+
+with the pieces at image offsets 0x0E18, 0x0AC4, 0x12E0, 0x0ACD, 0x1190, 0x0AD0, 0x0AAC —
+`dos4gw.exe` on disk confirms the first two are `DOS/16M` and ` error: `, and a watchpoint
+confirms DOS/4GW fills the 29-byte slot in just before it writes. So the text exists and is
+correct in memory.
+
+What is wrong is one instruction wide, and it is written down here because it is exactly
+reproducible:
+
+    [dpmi]60264 real-mode call 0050:0084 (iret frame) ax=40AC ds=0110(00001100) dx=0AAC
+    [int21]60265 ah=40 al=AC bx=0002 cx=0002 ds:dx=003F:0AAC es=0027 at 0050:00000086
+
+`rm_call` sets DS to paragraph 0110 (base 0x1100, where the message is) and jumps to our
+IVT stub at `0050:0084`. **One instruction later**, the `INT 21h` in that stub reaches the
+DOS layer with DS = 003F — the client's flat selector, used as a paragraph, pointing at
+0x3F0. Nothing between those two points loads DS: the only instruction executed is the
+`INT` itself, `Cpu::interrupt` does not touch DS, and `SegAlias` leaves it alone in real
+mode (and `pe()` is false, confirmed by the absence of a `pm:` line). The only code in the
+emulator that writes `sreg[]` without `set_seg` is `Cpu::restore()`, which means something
+is running `rm_return()` early — but its hook is at linear 0xE51 and `lin(CS,ip)` at the
+stub is 0x584.
+
+That is a contradiction between two things that cannot both be true, which makes it the
+good kind of bug. A watchpoint on `sreg[DS]` in the host would settle it in one run.
+
 ### Where the linker actually stands
 
 DOS/4GW gets through its own startup, walks the MCB chain and releases what is not its,

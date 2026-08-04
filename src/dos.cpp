@@ -555,7 +555,9 @@ bool Dos::handle(uint8_t n) {
         case 0x21: {
             if (!trace) return int21();
             const uint16_t ax = cpu_.r[AX], bx = cpu_.r[BX], cx = cpu_.r[CX], dx = cpu_.r[DX];
-            const uint16_t es = cpu_.sreg[ES];   // AH=48/49/4Ah and EXEC all carry a segment here
+            const uint16_t es = cpu_.sreg[ES], ds0 = cpu_.sreg[DS];   // captured at entry: a
+            // handler may legitimately change them, and printing the value afterwards made a
+            // reflected call look as if it had read from the wrong segment when it had not.
             // For a protected-mode caller the 16-bit pair says nothing: what the layer
             // will actually read is the descriptor base plus the *32-bit* offset, and
             // whether those two agree is the whole question.
@@ -581,7 +583,7 @@ bool Dos::handle(uint8_t n) {
             std::fprintf(stderr,
                 "[int21]%llu ah=%02X al=%02X bx=%04X cx=%04X ds:dx=%04X:%04X es=%04X -> %s ax=%04X bx=%04X"
                 "  at %04X:%08X\n",
-                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, cpu_.sreg[DS], dx, es,
+                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, ds0, dx, es,
                 (cpu_.flags & CF) ? "CF" : "ok", cpu_.r[AX], cpu_.r[BX],
                 cpu_.sreg[CS], cpu_.ip);
             if (pm) std::fprintf(stderr, "[int21]   pm: ds base=%08X edx=%08X -> %08X\n",

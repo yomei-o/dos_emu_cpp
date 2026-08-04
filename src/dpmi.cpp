@@ -314,9 +314,10 @@ void Dpmi::rm_call(bool iret_frame) {
     cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kEntrySeg);
     cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kOffRmRet);
 
-    if (trace) printf("[dpmi] real-mode call %04X:%04X (%s frame), ax=%04X ds=%04X dx=%04X\n",
-                      target_cs, target_ip, iret_frame ? "iret" : "retf",
-                      cpu_.r[AX], cpu_.sreg[DS], cpu_.r[DX]);
+    if (trace) printf("[dpmi]%llu real-mode call %04X:%04X (%s frame) ax=%04X ds=%04X(%08X) dx=%04X\n",
+                      static_cast<unsigned long long>(cpu_.insns), target_cs, target_ip,
+                      iret_frame ? "iret" : "retf",
+                      cpu_.r[AX], cpu_.sreg[DS], cpu_.sbase[DS], cpu_.r[DX]);
     cpu_.set_seg(CS, target_cs);
     cpu_.jump(target_ip);
 }
