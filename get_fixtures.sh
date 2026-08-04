@@ -3,6 +3,7 @@
 #
 #   sh get_fixtures.sh          # lsic/ + scratch_root/ from the committed bundle
 #   sh get_fixtures.sh djgpp    # ...and the DJGPP C/C++ toolchain too
+#   sh get_fixtures.sh ow       # ...or the OpenWatcom one, unpacked into ow/
 #
 # Nothing here is committed: lsic/ is the LSI C-86 tree, scratch_root/ is the drive the
 # native emulator runs against, djgpp/ is a third-party download. But web/lsic.tar.gz IS
@@ -84,6 +85,61 @@ int main()
 }
 CXXEOF
     echo "   wrote scratch_root/hello.c and scratch_root/mini.cpp"
+fi
+
+if [ "$1" = "ow" ]; then
+    echo "== OpenWatcom 11.0c into ow/ from upstream/*.zip"
+    mkdir -p ow
+    for z in core_binw core_all c_binw cpp_binw clib_hdr clib_d32 clib_d16 clib_o16              cpplib_hdr cpplib_o32 cpplib_o16; do
+        unzip -oq "upstream/$z.zip" -d ow
+    done
+    # dos4gw.exe is the one piece not in the component zips; the stub looks for it on
+    # PATH by that exact (lower-case) name.
+    unzip -oq upstream/dos4gw.zip -d ow/binw
+    [ -f ow/binw/DOS4GW.EXE ] && mv ow/binw/DOS4GW.EXE ow/binw/dos4gw.exe
+    echo "   ow/: $(du -sh ow | cut -f1) -- provenance and licences in upstream/README.md"
+
+    crlf ow/hello.c <<'WCEOF'
+#include <stdio.h>
+
+int main(void)
+{
+	int i, s = 0;
+	for (i = 1; i <= 10; i++)
+		s += i;
+	printf("hello from Watcom C, sum=%d\n", s);
+	return 0;
+}
+WCEOF
+
+    crlf ow/hello.cpp <<'WXEOF'
+#include <stdio.h>
+
+struct Adder {
+	int total;
+	Adder() : total(0) {}
+	void add(int v) { total += v; }
+};
+
+int main()
+{
+	Adder a;
+	for (int i = 1; i <= 10; ++i) a.add(i);
+	printf("hello from Watcom C++, sum=%d\n", a.total);
+	return 0;
+}
+WXEOF
+    echo "   wrote ow/hello.c and ow/hello.cpp"
+    cat <<'WEOF'
+
+done. Now:
+  sh build.sh
+  ./dosemu --root ow ow/binw/wcc386.exe hello.c     # -> hello.obj, "Code size: 44"
+  ./dosemu --root ow ow/binw/wcc.exe    hello.c     # the 16-bit compiler
+  ./dosemu --root ow ow/binw/wpp386.exe hello.cpp   # the C++ one
+Linking does not work yet -- see OPENWATCOM.md.
+WEOF
+    exit 0
 fi
 
 cat <<'EOF'
