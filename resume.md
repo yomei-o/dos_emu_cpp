@@ -3,17 +3,27 @@
 Working notes for picking the project back up. The README says what the emulator
 *is*; this says what works, what's next, and what was learned.
 
-> **All work is on `main`**, except the parked MCB chain on `wip-mcb-chain`.
-> Protected mode and the DPMI host are in and regression-green: DJGPP compiles C and
-> C++, and so do the three Watcom compilers. Two threads to pick up:
+> **All work is on `main`** (the MCB chain has been merged; `wip-mcb-chain` is history
+> now). Protected mode and the DPMI host are in and regression-green: DJGPP compiles C
+> and C++, and so do the three Watcom compilers.
 >
-> 1. **The Watcom linker.** `wlink` is stubbed for DOS/4GW. On `wip-mcb-chain` — which
->    gives conventional memory a real MCB chain — DOS/4GW gets all the way into its own
->    32-bit startup and stops on INT 31h **0305h** and **0306h**. That branch costs the
->    shell demo (FreeCOM validates the environment block against an MCB, and the
->    top-level environment lives outside the arena), and the fix is named in
->    `OPENWATCOM.md`. Merge it, then write those two functions.
-> 2. **argv** — see "The gap: argc == 0" below.
+> **What to pick up.** Nothing is broken, so this is a choice rather than a queue:
+>
+> 1. **The x87.** The FPU has a register stack and the common instructions
+>    (`src/fpu.cpp`), but nothing here has yet run a program that computes seriously with
+>    it. That is the obvious next test rather than the next fix.
+> 2. **The Watcom linker**, if it is worth it. `wlink` is stubbed for DOS/4GW, which now
+>    gets through its selector setup, allocates DOS memory and reads wlink's 32-bit image
+>    off disk before stopping — not on a missing function but on a structural mismatch:
+>    it reflects DOS calls by issuing `INT 21h` from protected mode with 32-bit offsets,
+>    and a host aliasing a selector to a paragraph can only carry 16. Finishing means real
+>    DPMI reflection with a transfer buffer and a DOS layer that takes linear addresses.
+>    `OPENWATCOM.md` weighs that against writing the OMF linker ourselves.
+>
+> **Fixed since the last note:** `Coprocessor not present and DPMI setup failed!` is gone
+> from every DJGPP program — it was INT 31h **0303h** (real-mode callbacks) all along,
+> exactly as this file predicted. argv was fixed earlier; the account of it below is
+> history, not an open bug.
 
 ## State (all verified, on the browser build too)
 
@@ -331,12 +341,11 @@ check the page after touching the emulator: it unpacks the bundle into MEMFS, bu
 both languages and asserts on what the programs print. The tar reader has to follow
 hard links — `cc1` is stored once and linked into `bin/`.
 
-**Also unimplemented, and harmless so far** — every DJGPP program opens with
-`Warning: Coprocessor not present and DPMI setup failed!`. That is exactly two missing
-functions: `0303h` (allocate real-mode callback), used to hook the FPU emulator, and
-`0E01h` (set coprocessor emulation). The x87 escapes are still no-ops in the CPU, so
-this only matters for a program that does floating point. `0507h` also fails; it is a
-DPMI 1.0 function the client merely probes.
+**Fixed.** Every DJGPP program used to open with `Warning: Coprocessor not present and
+DPMI setup failed!`. It was `0303h` (allocate real-mode callback), which is how DJGPP
+hooks the FPU emulator; that is implemented and the warning is gone. `0E01h` (set
+coprocessor emulation) and `0507h` are still unimplemented and still do not matter —
+the client only probes them.
 
 ### TODO — the rest of the extender work
 
