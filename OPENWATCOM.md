@@ -305,16 +305,26 @@ Two measurements pin down where it goes wrong, and they point back at us.
 and that instruction is a `repne scasb` — `strlen`, which returns 7. "DOS/16M" is seven
 characters. Nothing ever writes to that address.
 
-**And the write does not read it.** The same watchpoint is silent when the DOS write
-executes 168 instructions later. So the write is reading somewhere else: DS is 0x003F —
-base 0x3F0 as a paragraph — and 0x3F0 + 0x0E18 = 0x1208, which is where the saved
-interrupt-vector records live. The bytes are real, they are just not the message.
+**And a warning about the tool, which cost two hours.** `DOSEMU_WATCH` lives in
+`Cpu::lin()`, and neither the DOS layer nor the host goes through it: `Memory::rb/ww` take a
+segment and an offset and reach `Memory` directly, as does every write the host makes
+itself. So the watchpoint being *silent* during a DOS call proves nothing at all, and the
+conclusion drawn from that silence — "the write is reading somewhere else" — was wrong.
 
-So `load_frame()`'s conversion of a selector to the paragraph it aliases is *not* taking
-effect on this path, even though the trace printed after it says DS = 0110. That is a
-contradiction inside a dozen lines of our own code rather than a mystery about DOS/4GW,
-which makes it the last easy step: print the raw frame word next to what DS ends up as, and
-the disagreement resolves itself.
+What is measured, and stands:
+
+- the frame carries DS = 0x0110 as a plain paragraph, needing no conversion (printed beside
+  the raw word), and `set_seg` puts exactly that in place before the jump;
+- the string at that address is intact and seven characters long one instruction before,
+  measured by DOS/4GW's own `strlen`;
+- the seven bytes that come out are a saved interrupt-vector record.
+
+Three facts that cannot all be true of the same address, and the tool that would normally
+arbitrate is blind here. The next step is therefore to make it not blind — route the DOS
+layer's segment:offset accessors through `Cpu::lin()`, or add a second watchpoint inside
+`Memory` — and then ask again. That is a small change worth having for its own sake: every
+DOS-layer read is currently invisible to the only tool we have for "who touched this
+address".
 
 ### Where the linker actually stands
 

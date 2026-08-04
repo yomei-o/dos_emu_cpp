@@ -18,8 +18,10 @@ Working notes for picking the project back up. The README says what the emulator
 >    its output reaches the console. It still exits 8, and the message it is trying to
 >    print — `DOS/16M error: ...` — comes out as saved interrupt-vector records, because
 >    the write reads through DS = 0x003F rather than the paragraph the frame's selector
->    aliases. A watchpoint shows the strings intact and never written to, so this is a dozen
->    lines of our own `load_frame()` and not a mystery. **No DPMI function
+>    aliases — except that `DOSEMU_WATCH` cannot see DOS-layer or host accesses at all
+>    (it lives in `Cpu::lin()`, which `Memory::rb/ww` bypass), so the evidence for that is
+>    void. Making the watchpoint see `Memory` is the next step and is worth having anyway.
+>    **No DPMI function
 >    fails any more** bar `0A00h`, which every client probes. So what is left is one
 >    question about DOS/4GW's internal layout, not about the host; `OPENWATCOM.md` has the
 >    hex dump and the measurements, and weighs it against writing the OMF linker
