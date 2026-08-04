@@ -21,6 +21,7 @@ public:
         // INT 31h function 0300h and DOS calls made from protected mode both need to
         // land back in this handler, so the DPMI host reflects through it.
         dpmi_.real_int = [this](uint8_t n) { return handle(n); };
+        dpmi_.get_psp = [this] { return psp_seg; };
         dpmi_.alloc_dos = [this](uint16_t paras) -> uint16_t {
             if (heap_next_ + paras > heap_end_) return 0;
             uint16_t seg = heap_next_; heap_next_ += paras; return seg;

@@ -67,18 +67,22 @@ void Dpmi::switch_to_pm() {
     cpu_.r[SP] += 4;
 
     const bool is32 = (cpu_.r[AX] & 1) != 0;
-    const uint16_t rm_ds = cpu_.sreg[DS], rm_es = cpu_.sreg[ES], rm_ss = cpu_.sreg[SS];
+    const uint16_t rm_ds = cpu_.sreg[DS], rm_ss = cpu_.sreg[SS];
+    // ES must come out as a selector for the *PSP*, not an alias of whatever ES the
+    // client happened to be holding when it called. That is the spec, and it is not a
+    // formality: it is how an extender locates the command tail at PSP:0x80 and the
+    // environment segment at PSP:0x2C. Get it wrong and the client starts with argc 0
+    // and an empty environment, with nothing else visibly broken.
+    const uint16_t psp = get_psp ? get_psp() : cpu_.sreg[ES];
 
-    // Four 16-bit descriptors over the client's current real-mode segments. DPMI
-    // returns CS/DS/SS aliasing the real-mode ones and ES pointing at the PSP, which
-    // for the stub is the ES it called us with.
+    // Four 16-bit descriptors over the segments the client resumes with.
     const uint16_t cs_sel = alloc_sel();
     const uint16_t ds_sel = alloc_sel();
     const uint16_t es_sel = alloc_sel();
     const uint16_t ss_sel = alloc_sel();
     set_desc(cs_sel, static_cast<uint32_t>(ret_cs) << 4, 0xFFFF, true,  false);
     set_desc(ds_sel, static_cast<uint32_t>(rm_ds)  << 4, 0xFFFF, false, false);
-    set_desc(es_sel, static_cast<uint32_t>(rm_es)  << 4, 0xFFFF, false, false);
+    set_desc(es_sel, static_cast<uint32_t>(psp)    << 4, 0x00FF, false, false);   // the PSP is 256 bytes
     set_desc(ss_sel, static_cast<uint32_t>(rm_ss)  << 4, 0xFFFF, false, false);
 
     cpu_.cr[0] |= 1;                      // PE — from here set_seg() reads descriptors
@@ -90,8 +94,8 @@ void Dpmi::switch_to_pm() {
     cpu_.set_flag(CF, false);
 
     if (trace)
-        printf("[dpmi] switch to %s protected mode: cs=%04X(%04X) ds=%04X ss=%04X ip=%04X\n",
-               is32 ? "32-bit" : "16-bit", cs_sel, ret_cs, ds_sel, ss_sel, ret_ip);
+        printf("[dpmi] switch to %s protected mode: cs=%04X(%04X) ds=%04X es=%04X(psp %04X) ss=%04X ip=%04X\n",
+               is32 ? "32-bit" : "16-bit", cs_sel, ret_cs, ds_sel, es_sel, psp, ss_sel, ret_ip);
 }
 
 // INT 31h 0300h — "simulate real-mode interrupt". This is the hinge of the whole

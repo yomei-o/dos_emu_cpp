@@ -181,20 +181,18 @@ How it fits together:
 Watch one run with `DOSEMU_DPMI_TRACE=1`: it logs every INT 31h call and, for each
 reflected interrupt, the DOS function and the bytes of any write.
 
-**⏭ The gap: `argc == 0`.** Programs run and produce their own output, but get no
-arguments — `dtou` prints `Usage:  [-b] ...` with an empty `argv[0]`, and `djecho hello
-world` prints a bare newline. Both the command tail *and* the environment are missing,
-not just one, so the client's view of the PSP is wrong rather than the tail being
-malformed — and the 16-bit path is fine (`LCC.EXE PROG.C` parses its tail correctly), so
-the PSP itself is built right. Ruled out: `AH=62h` (the stub never calls it; implemented
-anyway), and `_dos_ds` (the client builds it as selector `0x4C`, base 0, limit
-`0x110FFF`, which addresses the PSP at linear `0x1080` correctly).
+**argv works** — and the bug was worth writing down. Programs ran and produced their own
+output but got `argc == 0`, with *both* the command tail and the environment missing.
+That pointed at the client's view of the PSP rather than at the tail, and the cause was
+one line of the DPMI mode-switch contract: **on exit ES must be a selector for the
+client's PSP**, not an alias of whatever ES it happened to be holding when it called.
+That is how an extender finds the tail at PSP:0x80 and the environment segment at
+PSP:0x2C. We were aliasing the caller's ES, so go32 recorded the wrong PSP and read an
+empty tail out of it — with nothing else visibly broken.
 
-Next step, and do this before theorising further: find *where* the client reads the PSP.
-`_go32_info_block.linear_address_of_original_psp` is filled in by the stub before the
-mode switch, from plain real-mode memory reads that leave no trace — so the way to see
-it is a watchpoint on reads of linear `0x1000`–`0x10FF`, or dumping the stub info
-structure once the client has built it.
+Ruled out along the way, so nobody re-checks them: `AH=62h` (the stub never calls it;
+implemented anyway, and it *was* genuinely missing), and `_dos_ds` (the client builds it
+correctly as selector `0x4C`, base 0, limit `0x110FFF`).
 
 **Also unimplemented, and harmless so far** — every DJGPP program opens with
 `Warning: Coprocessor not present and DPMI setup failed!`. That is exactly two missing

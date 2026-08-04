@@ -40,6 +40,9 @@ public:
     // for here is the same conventional memory INT 21h AH=48h hands out, and two
     // allocators over one heap would overlap.
     std::function<uint16_t(uint16_t)> alloc_dos;
+    // The current PSP segment. The mode switch must hand the client ES = a selector for
+    // its PSP, which is how an extender finds the command tail and the environment.
+    std::function<uint16_t()> get_psp;
 
     // Log every INT 31h call and its outcome. On by default when DOSEMU_DPMI_TRACE is
     // set; the point is to find out what a client actually needs rather than guessing
