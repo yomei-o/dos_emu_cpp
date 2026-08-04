@@ -40,6 +40,24 @@ void Cpu::fpu_exec(uint8_t op, int reg, int mod, int rm, uint32_t addr) {
     auto push = [&](double v) { ftop = (ftop - 1) & 7; fst[ftop] = v; };
     auto pop  = [&]() { ftop = (ftop + 1) & 7; };
 
+    // Integer conversion follows the control word's rounding-control field. Not a detail:
+    // a C cast to int has to truncate, and the way a compiler gets that is to set RC=11
+    // around the FIST, so a store that always rounds to nearest makes `(long)0.6` come
+    // out as 1. It is also how printf("%f") splits a value — extract the integer part,
+    // subtract, repeat — so ignoring RC did not produce slightly-off numbers, it printed
+    // 0.841471 as 1.000000 and 2.928968 as 3.000000, which looks nothing like a rounding
+    // bug and everything like broken arithmetic.
+    //
+    //   RC = 00 nearest (even)   01 down (-inf)   10 up (+inf)   11 truncate (toward 0)
+    auto round_rc = [&](double v) -> double {
+        switch ((fcw >> 10) & 3) {
+            case 1:  return std::floor(v);
+            case 2:  return std::ceil(v);
+            case 3:  return std::trunc(v);
+            default: return std::nearbyint(v);   // nearbyint is round-half-to-even
+        }
+    };
+
     auto rd32 = [&] { return mem_.r32(addr); };
     auto rd64 = [&] { return static_cast<uint64_t>(mem_.r32(addr))
                            | (static_cast<uint64_t>(mem_.r32(addr + 4)) << 32); };
@@ -129,8 +147,8 @@ void Cpu::fpu_exec(uint8_t op, int reg, int mod, int rm, uint32_t addr) {
             case 0xDB:
                 switch (reg) {
                     case 0: push(static_cast<double>(static_cast<int32_t>(rd32()))); break;   // FILD m32
-                    case 2: mem_.w32(addr, static_cast<uint32_t>(static_cast<int32_t>(std::nearbyint(st(0))))); break;
-                    case 3: mem_.w32(addr, static_cast<uint32_t>(static_cast<int32_t>(std::nearbyint(st(0))))); pop(); break;
+                    case 2: mem_.w32(addr, static_cast<uint32_t>(static_cast<int32_t>(round_rc(st(0))))); break;
+                    case 3: mem_.w32(addr, static_cast<uint32_t>(static_cast<int32_t>(round_rc(st(0))))); pop(); break;
                     case 5: push(rd80()); break;                               // FLD m80
                     case 7: wr80(st(0)); pop(); break;                         // FSTP m80
                 }
@@ -138,10 +156,10 @@ void Cpu::fpu_exec(uint8_t op, int reg, int mod, int rm, uint32_t addr) {
             case 0xDF:
                 switch (reg) {
                     case 0: push(static_cast<double>(static_cast<int16_t>(mem_.r16(addr)))); break;   // FILD m16
-                    case 2: mem_.w16(addr, static_cast<uint16_t>(static_cast<int16_t>(std::nearbyint(st(0))))); break;
-                    case 3: mem_.w16(addr, static_cast<uint16_t>(static_cast<int16_t>(std::nearbyint(st(0))))); pop(); break;
+                    case 2: mem_.w16(addr, static_cast<uint16_t>(static_cast<int16_t>(round_rc(st(0))))); break;
+                    case 3: mem_.w16(addr, static_cast<uint16_t>(static_cast<int16_t>(round_rc(st(0))))); pop(); break;
                     case 5: push(static_cast<double>(static_cast<int64_t>(rd64()))); break;           // FILD m64
-                    case 7: wr64(static_cast<uint64_t>(static_cast<int64_t>(std::nearbyint(st(0))))); pop(); break;
+                    case 7: wr64(static_cast<uint64_t>(static_cast<int64_t>(round_rc(st(0))))); pop(); break;
                 }
                 break;
             case 0xDA: {                                          // arithmetic with i32
@@ -165,6 +183,16 @@ void Cpu::fpu_exec(uint8_t op, int reg, int mod, int rm, uint32_t addr) {
         case 0xD8:                                                // ST(0) op= ST(i)
             if (reg == 2 || reg == 3) { compare(st(0), st(rm)); if (reg == 3) pop(); }
             else arith(reg, st(0), st(rm), false);
+            break;
+        // FUCOMPP (DA E9): compare ST(0) with ST(1) and pop both. The unordered form of
+        // FCOMPP, and the one a C library reaches for because it must not fault on a NaN.
+        // Leaving it out left the compare flags holding the *previous* comparison, so
+        // printf's digit loop took the wrong branch and emitted a fraction of all zeros:
+        // 0.666667 printed as 0.000000 while (long)(q*1e6) came out at exactly 666666.
+        // Arithmetic that is provably right and formatting that is wrong is a strange
+        // place to end up, and it is what a missing compare looks like.
+        case 0xDA:
+            if (reg == 5 && rm == 1) { compare(st(0), st(1)); pop(); pop(); }
             break;
         case 0xDC:                                                // ST(i) op= ST(0), reversed
             if (reg == 2 || reg == 3) { compare(st(rm), st(0)); }
@@ -199,7 +227,7 @@ void Cpu::fpu_exec(uint8_t op, int reg, int mod, int rm, uint32_t addr) {
                     switch (rm) {
                         case 0: st(0) = std::fmod(st(0), st(1)); break;         // FPREM
                         case 2: st(0) = std::sqrt(st(0)); break;                // FSQRT
-                        case 4: st(0) = std::nearbyint(st(0)); break;           // FRNDINT
+                        case 4: st(0) = round_rc(st(0)); break;           // FRNDINT
                         case 5: st(0) = std::ldexp(st(0), static_cast<int>(st(1))); break;  // FSCALE
                         case 6: st(0) = std::sin(st(0)); break;                 // FSIN
                         case 7: st(0) = std::cos(st(0)); break;                 // FCOS

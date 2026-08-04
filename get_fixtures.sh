@@ -84,7 +84,24 @@ int main()
 	return 0;
 }
 CXXEOF
-    echo "   wrote scratch_root/hello.c and scratch_root/mini.cpp"
+    # Floating point, which is its own thing: it goes through the x87 register stack, the
+    # control word's rounding mode, libm and printf's %f conversion, and every one of
+    # those was wrong at some point in a way that still printed a plausible number.
+    crlf scratch_root/fp.c <<'FPEOF'
+#include <stdio.h>
+#include <math.h>
+
+int main(void)
+{
+	double s = 0.0;
+	int i;
+	for (i = 1; i <= 10; i++)
+		s += 1.0 / i;
+	printf("H10=%.6f sqrt2=%.6f sin1=%.6f\n", s, sqrt(2.0), sin(1.0));
+	return 0;
+}
+FPEOF
+    echo "   wrote scratch_root/hello.c, scratch_root/mini.cpp and scratch_root/fp.c"
 fi
 
 if [ "$1" = "ow" ]; then
@@ -152,4 +169,6 @@ done. Now:
   ./dosemu --root scratch_root scratch_root/DJGPP/bin/gpp.exe -O2 mini.cpp -o mini.exe
   ./dosemu --root scratch_root scratch_root/hello.exe    # hello from DJGPP gcc, sum=55
   ./dosemu --root scratch_root scratch_root/mini.exe     # ...and the C++ one
+  ./dosemu --root scratch_root scratch_root/DJGPP/bin/gcc.exe -O2 fp.c -lm -o fp.exe
+  ./dosemu --root scratch_root scratch_root/fp.exe       # H10=2.928968 sqrt2=1.414214 sin1=0.841471
 EOF

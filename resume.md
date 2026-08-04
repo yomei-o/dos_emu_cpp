@@ -9,9 +9,10 @@ Working notes for picking the project back up. The README says what the emulator
 >
 > **What to pick up.** Nothing is broken, so this is a choice rather than a queue:
 >
-> 1. **The x87.** The FPU has a register stack and the common instructions
->    (`src/fpu.cpp`), but nothing here has yet run a program that computes seriously with
->    it. That is the obvious next test rather than the next fix.
+> 1. **The x87 now computes correctly** through libm and `printf("%f")` — verified by
+>    `scratch_root/fp.c`, which `get_fixtures.sh djgpp` writes:
+>    `H10=2.928968 sqrt2=1.414214 sin1=0.841471`. Getting there took two fixes, both
+>    worth knowing about, in "The x87 was wrong twice" below.
 > 2. **The Watcom linker**, if it is worth it. `wlink` is stubbed for DOS/4GW, which now
 >    gets through its selector setup, allocates DOS memory and reads wlink's 32-bit image
 >    off disk before stopping — not on a missing function but on a structural mismatch:
@@ -340,6 +341,29 @@ needs `-lstdcxx -lsupcxx` ahead of them.
 check the page after touching the emulator: it unpacks the bundle into MEMFS, builds
 both languages and asserts on what the programs print. The tar reader has to follow
 hard links — `cc1` is stored once and linked into `bin/`.
+
+### The x87 was wrong twice, and both were invisible
+
+The FPU stopped being a no-op some time ago, but nothing had run a program that
+*computed* with it until now. Two bugs, and the interesting thing is that neither
+looked like an FPU bug from the outside.
+
+**Integer stores ignored the control word's rounding mode.** `FIST`/`FISTP` always
+rounded to nearest. A C cast to int has to truncate, and the way a compiler gets that is
+to set RC=11 around the store — so `(long)0.666` came out as 1. It is also how
+`printf("%f")` splits a value, which is why `0.841471` printed as `1.000000`: nothing
+about that output says "rounding mode", it says "arithmetic is broken".
+
+**`FUCOMPP` (DA E9) was missing.** The unordered compare-and-pop-both, which a C library
+uses because it must not fault on a NaN. Without it the compare flags held the *previous*
+comparison, so printf's digit loop branched wrongly and emitted a fraction of all zeros.
+The symptom was `(long)(q*1e6)` giving exactly `666666` while `printf("%f", q)` gave
+`0.000000` — provably correct arithmetic and wrong formatting, which is a strange place to
+end up and is what a missing compare looks like.
+
+The lesson is the one at the top of `src/fpu.cpp`, now with evidence: an FPU instruction
+that silently does nothing is worse than one that faults, because the program carries on
+computing with whatever was in the register.
 
 **Fixed.** Every DJGPP program used to open with `Warning: Coprocessor not present and
 DPMI setup failed!`. It was `0303h` (allocate real-mode callback), which is how DJGPP
