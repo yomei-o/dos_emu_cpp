@@ -78,7 +78,7 @@ bool Dpmi::int2f() {
     cpu_.set_seg(ES, kEntrySeg);
     cpu_.r[DI] = 0;                       // ES:DI = the mode-switch entry
     cpu_.set_flag(CF, false);
-    if (trace) printf("[dpmi] 2F/1687 -> host at %04X:0000\n", kEntrySeg);
+    if (trace) std::fprintf(stderr, "[dpmi] 2F/1687 -> host at %04X:0000\n", kEntrySeg);
     return true;
 }
 
@@ -92,7 +92,7 @@ void Dpmi::switch_to_pm() {
     const uint16_t ret_ip = mem_.rw(cpu_.sreg[SS], cpu_.r[SP]);
     const uint16_t ret_cs = mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 2);
     if (trace)
-        printf("[dpmi] mode-switch entry: ax=%04X ss:sp=%04X:%04X stack=%04X %04X %04X %04X\n",
+        std::fprintf(stderr, "[dpmi] mode-switch entry: ax=%04X ss:sp=%04X:%04X stack=%04X %04X %04X %04X\n",
                cpu_.r[AX], cpu_.sreg[SS], cpu_.r[SP],
                mem_.rw(cpu_.sreg[SS], cpu_.r[SP]), mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 2),
                mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 4), mem_.rw(cpu_.sreg[SS], cpu_.r[SP] + 6));
@@ -145,22 +145,22 @@ void Dpmi::switch_to_pm() {
     cpu_.set_flag(CF, false);
 
     if (trace) {
-        printf("[dpmi] switch to %s protected mode: cs=%04X(%04X) ds=%04X es=%04X(psp %04X) ss=%04X ip=%04X\n",
+        std::fprintf(stderr, "[dpmi] switch to %s protected mode: cs=%04X(%04X) ds=%04X es=%04X(psp %04X) ss=%04X ip=%04X\n",
                is32 ? "32-bit" : "16-bit", cs_sel, ret_cs, ds_sel, es_sel, psp, ss_sel, ret_ip);
         // The two things a client reads out of the PSP, at the moment it gets it: the
         // command tail and the environment segment. Everything a program knows about
         // how it was invoked comes through these, so when a client starts up blind this
         // says immediately whether it was handed nothing or misread something.
         const uint16_t env = mem_.rw(psp, 0x2C);
-        printf("[dpmi]   psp:80 tail(%u) \"", mem_.rb(psp, 0x80));
-        for (uint8_t i = 0; i < mem_.rb(psp, 0x80) && i < 40; ++i) printf("%c", mem_.rb(psp, 0x81 + i));
-        printf("\"  psp:2C env=%04X \"", env);
+        std::fprintf(stderr, "[dpmi]   psp:80 tail(%u) \"", mem_.rb(psp, 0x80));
+        for (uint8_t i = 0; i < mem_.rb(psp, 0x80) && i < 40; ++i) std::fprintf(stderr, "%c", mem_.rb(psp, 0x81 + i));
+        std::fprintf(stderr, "\"  psp:2C env=%04X \"", env);
         for (uint16_t i = 0; i < 120; ++i) {
             const uint8_t c = mem_.rb(env, i);
             if (!c && !mem_.rb(env, i + 1)) break;
-            printf("%c", c ? c : '|');
+            std::fprintf(stderr, "%c", c ? c : '|');
         }
-        printf("\"\n");
+        std::fprintf(stderr, "\"\n");
     }
 }
 
@@ -209,7 +209,7 @@ bool Dpmi::pm_int(uint8_t n) {
     if (wide) { cpu_.push32(cpu_.flags); cpu_.push32(cpu_.sreg[CS]); cpu_.push32(cpu_.ip); }
     else      { cpu_.push16(cpu_.flags); cpu_.push16(cpu_.sreg[CS]);
                 cpu_.push16(static_cast<uint16_t>(cpu_.ip)); }
-    if (trace) printf("[dpmi]%llu pm int %02X ax=%04X -> client %04X:%08X (%s frame)\n",
+    if (trace) std::fprintf(stderr, "[dpmi]%llu pm int %02X ax=%04X -> client %04X:%08X (%s frame)\n",
                       static_cast<unsigned long long>(cpu_.insns), n, cpu_.r[AX],
                       h.sel, h.off, wide ? "32-bit" : "16-bit");
     cpu_.set_flag(IF, false);
@@ -218,19 +218,39 @@ bool Dpmi::pm_int(uint8_t n) {
     return true;
 }
 
-// The address 0204h reports as the *host's* handler for a vector, so a client can chain
-// to it. Reaching it services the interrupt the ordinary way and then unwinds the frame
-// itself, because the client may have arrived here by jumping with a frame we built.
-void Dpmi::pm_int_default(uint8_t n) {
-    in_default_ = true;
-    if (real_int) real_int(n);
-    in_default_ = false;
-    const bool wide = client32_;
+// The IRET a protected-mode interrupt handler owes: pop the frame this host pushed in
+// pm_int() and resume the interrupted code.
+void Dpmi::unwind_int_frame(bool wide) {
     const uint32_t ip = wide ? cpu_.pop32() : cpu_.pop16();
     const uint16_t cs = static_cast<uint16_t>(wide ? cpu_.pop32() : cpu_.pop16());
     cpu_.flags = static_cast<uint16_t>((wide ? cpu_.pop32() : cpu_.pop16()) | 0x0002);
     cpu_.set_seg(CS, cs);
     cpu_.jump(ip);
+}
+
+// The address 0204h reports as the *host's* handler for a vector, so a client can chain
+// to it. Reaching it services the interrupt the ordinary way and then unwinds the frame
+// itself, because the client may have arrived here by jumping with a frame we built.
+//
+// Unless servicing it transferred control. 0301h/0302h do not return a result: they hand
+// the CPU to a real-mode procedure and expect the guest to run it next. Unwinding here
+// would throw that away and jump to whatever three dwords the *real-mode* stack happened
+// to hold — which is how DOS/4GW ended up executing the interrupt vector table. The IRET
+// is not cancelled, only deferred: rm_return() performs it when the procedure comes back
+// and the client's context is whole again.
+void Dpmi::pm_int_default(uint8_t n) {
+    const bool wide = client32_;
+    rm_transferred_ = false;
+    in_default_ = true;
+    if (real_int) real_int(n);
+    in_default_ = false;
+    if (rm_transferred_) {
+        rm_transferred_ = false;
+        rm_[rm_depth_ - 1].unwind = true;
+        rm_[rm_depth_ - 1].wide = wide;
+        return;
+    }
+    unwind_int_frame(wide);
 }
 
 // The 50-byte real-mode call structure, in and out. Shared by 0300h and 0301h/0302h.
@@ -259,12 +279,14 @@ void Dpmi::load_frame(uint32_t f) {
     cpu_.set_seg(GS, as_paragraph(mem_.r16(f + 0x28)));
 }
 
-void Dpmi::store_frame(uint32_t f) {
+void Dpmi::store_frame(uint32_t f) { store_frame(f, cpu_.flags); }
+
+void Dpmi::store_frame(uint32_t f, uint16_t flags) {
     mem_.w32(f + 0x00, cpu_.gd(DI)); mem_.w32(f + 0x04, cpu_.gd(SI));
     mem_.w32(f + 0x08, cpu_.gd(BP)); mem_.w32(f + 0x10, cpu_.gd(BX));
     mem_.w32(f + 0x14, cpu_.gd(DX)); mem_.w32(f + 0x18, cpu_.gd(CX));
     mem_.w32(f + 0x1C, cpu_.gd(AX));
-    mem_.w16(f + 0x20, cpu_.flags);
+    mem_.w16(f + 0x20, flags);
     mem_.w16(f + 0x22, cpu_.sreg[ES]); mem_.w16(f + 0x24, cpu_.sreg[DS]);
     mem_.w16(f + 0x26, cpu_.sreg[FS]); mem_.w16(f + 0x28, cpu_.sreg[GS]);
 }
@@ -290,6 +312,7 @@ void Dpmi::rm_call(bool iret_frame) {
     RmCall& rc = rm_[rm_depth_++];
     rc.saved = cpu_.save();
     rc.frame = f;
+    rc.unwind = false; rc.wide = false; rc.iret = iret_frame;
 
     const uint16_t target_cs = mem_.r16(f + 0x2C), target_ip = mem_.r16(f + 0x2A);
     uint16_t ss = mem_.r16(f + 0x30), sp = mem_.r16(f + 0x2E);
@@ -323,12 +346,13 @@ void Dpmi::rm_call(bool iret_frame) {
     cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kEntrySeg);
     cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kOffRmRet);
 
-    if (trace) printf("[dpmi]%llu real-mode call %04X:%04X (%s frame) ax=%04X ds=%04X(%08X) dx=%04X\n",
+    if (trace) std::fprintf(stderr, "[dpmi]%llu real-mode call %04X:%04X (%s frame) ax=%04X ds=%04X(%08X) dx=%04X\n",
                       static_cast<unsigned long long>(cpu_.insns), target_cs, target_ip,
                       iret_frame ? "iret" : "retf",
                       cpu_.r[AX], cpu_.sreg[DS], cpu_.sbase[DS], cpu_.r[DX]);
     cpu_.set_seg(CS, target_cs);
     cpu_.jump(target_ip);
+    rm_transferred_ = true;   // the CPU is the procedure's now; nobody may unwind over it
 }
 
 // The procedure returned. Hand its registers back through the frame and put the client
@@ -337,11 +361,25 @@ void Dpmi::rm_call(bool iret_frame) {
 void Dpmi::rm_return() {
     if (!rm_depth_) { cpu_.jump(cpu_.ip); return; }
     RmCall& rc = rm_[--rm_depth_];
-    store_frame(rc.frame);
-    if (trace) printf("[dpmi] real-mode call returned ax=%04X flags=%04X\n",
-                      cpu_.r[AX], cpu_.flags);
+    // The flags the procedure computed — for 0302h that is *not* the flags register now.
+    // The procedure ends with IRET, and an IRET restores the flags image from the frame,
+    // which for 0302h this host fabricated: it is our own value from before the call and
+    // says nothing. What the client is waiting for is what the procedure produced, and
+    // after the IRET it survives only in Cpu::iret_flags. This is the whole result of a
+    // reflected DOS call: `open` reports "no such file" in CF and nothing else. Returning
+    // the stale image told wlink every failed open had succeeded, so it used the error
+    // code as a file handle and reported "invalid library file attribute" about a library
+    // it had never read — the "success but blank" failure mode again, one layer down.
+    const uint16_t result_flags = rc.iret ? cpu_.iret_flags : cpu_.flags;
+    store_frame(rc.frame, result_flags);
+    if (trace) std::fprintf(stderr, "[dpmi] real-mode call returned ax=%04X flags=%04X\n",
+                      cpu_.r[AX], result_flags);
     cpu_.restore(rc.saved);
     cpu_.set_flag(CF, false);                            // the DPMI call itself succeeded
+    // The context just restored has CS:IP back at the host's default interrupt handler,
+    // which is where the 0301h/0302h came from if pm_int_default() deferred its IRET to us.
+    // Resuming there would re-enter the handler forever, so perform the unwind it skipped.
+    if (rc.unwind) unwind_int_frame(rc.wide);
 }
 
 // A selector over the whole first megabyte. A callback hands the client a pointer to the
@@ -392,7 +430,7 @@ void Dpmi::call_back(int slot) {
 
     const uint32_t rm_stack = static_cast<uint32_t>(cpu_.sreg[SS]) * 16 + cpu_.r[SP];
     if (trace)
-        printf("[dpmi] callback %d -> %04X:%08X, real stack %04X:%04X\n",
+        std::fprintf(stderr, "[dpmi] callback %d -> %04X:%08X, real stack %04X:%04X\n",
                slot, cb.proc_sel, cb.proc_off, cpu_.sreg[SS], cpu_.r[SP]);
 
     uint16_t ss; uint32_t sp;
@@ -426,7 +464,7 @@ void Dpmi::cb_return() {
     cpu_.set_seg(SS, mem_.r16(f + 0x30)); cpu_.r[SP] = mem_.r16(f + 0x2E);
     cpu_.set_seg(CS, mem_.r16(f + 0x2C));
     cpu_.jump(mem_.r16(f + 0x2A));
-    if (trace) printf("[dpmi] callback returns to %04X:%04X\n", cpu_.sreg[CS], cpu_.r[SP]);
+    if (trace) std::fprintf(stderr, "[dpmi] callback returns to %04X:%04X\n", cpu_.sreg[CS], cpu_.r[SP]);
 }
 
 // The raw mode switches of INT 31h 0306h. Entered by a far JMP -- not a call, there is no
@@ -442,7 +480,7 @@ void Dpmi::raw_switch(bool to_pm) {
     const uint16_t nds = cpu_.r[AX], nes = cpu_.r[CX], nss = cpu_.r[DX], ncs = cpu_.r[SI];
     const uint32_t nsp = cpu_.gd(BX), nip = cpu_.gd(DI);
     if (trace)
-        printf("[dpmi] raw switch to %s: cs=%04X ip=%08X ds=%04X es=%04X ss=%04X sp=%08X\n",
+        std::fprintf(stderr, "[dpmi] raw switch to %s: cs=%04X ip=%08X ds=%04X es=%04X ss=%04X sp=%08X\n",
                to_pm ? "pm" : "real", ncs, nip, nds, nes, nss, nsp);
     if (to_pm) cpu_.cr[0] |= 1u; else cpu_.cr[0] &= ~1u;
     // Order matters twice over: SS before the stack pointer, because whether ESP is 16-
@@ -485,7 +523,7 @@ void Dpmi::simulate_real_int() {
     cpu_.set_seg(SS, ss); cpu_.r[SP] = sp;
 
     if (trace) {
-        printf("[dpmi]   reflect INT %02X ah=%02X al=%02X ds=%04X dx=%04X cx=%04X",
+        std::fprintf(stderr, "[dpmi]   reflect INT %02X ah=%02X al=%02X ds=%04X dx=%04X cx=%04X",
                vec, cpu_.r[AX] >> 8, cpu_.r[AX] & 0xFF, cpu_.sreg[DS], cpu_.r[DX], cpu_.r[CX]);
         // Show what a write actually writes. Whether a client's output is empty is the
         // difference between "the DOS call failed" and "the client had nothing to say",
@@ -495,23 +533,23 @@ void Dpmi::simulate_real_int() {
         const uint8_t ah = static_cast<uint8_t>(cpu_.r[AX] >> 8);
         if (vec == 0x21 && (ah == 0x3D || ah == 0x3C || ah == 0x41 || ah == 0x43 ||
                             ah == 0x4E || ah == 0x60 || ah == 0x39 || ah == 0x3B)) {
-            printf("  \"");
+            std::fprintf(stderr, "  \"");
             for (int i = 0; i < 80; ++i) {
                 const uint8_t c = mem_.rb(cpu_.sreg[DS], static_cast<uint16_t>(cpu_.r[DX] + i));
                 if (!c) break;
-                printf("%c", (c >= 32 && c < 127) ? c : '.');
+                std::fprintf(stderr, "%c", (c >= 32 && c < 127) ? c : '.');
             }
-            printf("\"");
+            std::fprintf(stderr, "\"");
         }
         if (vec == 0x21 && (cpu_.r[AX] >> 8) == 0x40) {
-            printf("  \"");
+            std::fprintf(stderr, "  \"");
             for (uint16_t i = 0; i < cpu_.r[CX] && i < 60; ++i) {
                 const uint8_t c = mem_.rb(cpu_.sreg[DS], static_cast<uint16_t>(cpu_.r[DX] + i));
-                printf("%c", (c >= 32 && c < 127) ? c : '.');
+                std::fprintf(stderr, "%c", (c >= 32 && c < 127) ? c : '.');
             }
-            printf("\"");
+            std::fprintf(stderr, "\"");
         }
-        printf("\n");
+        std::fprintf(stderr, "\n");
     }
     if (real_int) real_int(vec);
 
@@ -750,7 +788,7 @@ bool Dpmi::int31() {
     }
 
     if (trace)
-        printf("[dpmi]%llu int31 AX=%04X BX=%04X CX=%04X DX=%04X -> %s AX=%04X\n",
+        std::fprintf(stderr, "[dpmi]%llu int31 AX=%04X BX=%04X CX=%04X DX=%04X -> %s AX=%04X\n",
                (unsigned long long)cpu_.insns, fn, cpu_.r[BX], cpu_.r[CX], cpu_.r[DX],
                cpu_.get_flag(CF) ? "FAIL" : "ok", cpu_.r[AX]);
     return true;

@@ -114,6 +114,13 @@ if [ "$1" = "ow" ]; then
     # PATH by that exact (lower-case) name.
     unzip -oq upstream/dos4gw.zip -d ow/binw
     [ -f ow/binw/DOS4GW.EXE ] && mv ow/binw/DOS4GW.EXE ow/binw/dos4gw.exe
+    # The linker's directive file, which is where `system dos` and `system dos4g` are
+    # defined (wlink.lnk includes wlsystem.lnk). wlink looks for it by bare name in the
+    # *current directory* and nowhere else -- measured, not assumed: it makes exactly one
+    # open call, `wlink.lnk`, and if that fails it carries on with no system definitions
+    # at all and cannot decide an output format. So it has to be at the root of the drive
+    # the guest starts on, which is ow/ itself.
+    cp ow/binw/wlink.lnk ow/binw/wlsystem.lnk ow/
     echo "   ow/: $(du -sh ow | cut -f1) -- provenance and licences in upstream/README.md"
 
     crlf ow/hello.c <<'WCEOF'
@@ -154,7 +161,16 @@ done. Now:
   ./dosemu --root ow ow/binw/wcc386.exe hello.c     # -> hello.obj, "Code size: 44"
   ./dosemu --root ow ow/binw/wcc.exe    hello.c     # the 16-bit compiler
   ./dosemu --root ow ow/binw/wpp386.exe hello.cpp   # the C++ one
-Linking does not work yet -- see OPENWATCOM.md.
+
+and the whole way through, compiler + linker + the program it builds:
+
+  ./dosemu --root ow ow/binw/wcc.exe   hello.c
+  ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe"
+  ./dosemu --root ow hello.exe                      # hello from Watcom C, sum=55
+
+A 32-bit link (`system dos4g` on a wcc386 object) gets as far as "creating a DOS/4G
+executable" and then stops on `__grab_fpe_`, which lives in math387r.lib -- a package
+this fixture set does not include. That is a missing library, not a linker problem.
 WEOF
     exit 0
 fi

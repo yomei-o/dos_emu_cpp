@@ -70,6 +70,13 @@ public:
     // 64 KiB below the segment — in zeroed memory. Every write to ip goes through this
     // mask; it is 0xFFFFFFFF only inside a D=1 (32-bit) code segment.
     uint32_t ip_mask = 0xFFFFu;
+    // The flags as they stood immediately before the last IRET replaced them. An IRET
+    // restores the flags image whoever built the frame put there — which is meaningful
+    // when the frame came from a real interrupt, and meaningless when the DPMI host
+    // fabricated it to call a real-mode procedure (0302h). In that case the flags the
+    // procedure *computed* are the answer the client is waiting for, and they exist
+    // nowhere else once the IRET has run. See Dpmi::rm_return().
+    uint16_t iret_flags = 0x0002;
 
     bool pe() const { return (cr[0] & 1) != 0; }
     // Linear address for a segment index + offset. Real mode wraps at 1 MiB exactly

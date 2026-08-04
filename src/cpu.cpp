@@ -761,8 +761,9 @@ void Cpu::step() {
         case 0xCC: interrupt(3); break;
         case 0xCD: { uint8_t n = fetch8(); interrupt(n); break; }
         case 0xCE: if (get_flag(OF)) interrupt(4); break;
-        case 0xCF: { uint32_t no = popV(); uint16_t ns = static_cast<uint16_t>(popV());
-                     flags = (popV() & 0xFFFF) | 0x0002; far_ret(ns, no, o32); break; }   // IRET
+        case 0xCF: { iret_flags = flags;                                                  // IRET
+                     uint32_t no = popV(); uint16_t ns = static_cast<uint16_t>(popV());
+                     flags = (popV() & 0xFFFF) | 0x0002; far_ret(ns, no, o32); break; }
 
         // CALL / JMP
         case 0xE8: { int32_t rel = o32 ? static_cast<int32_t>(fetch32()) : static_cast<int16_t>(fetch16()); pushV(ip); jump(ip + rel); break; }   // CALL near rel

@@ -145,14 +145,22 @@ private:
 
     // 0301h/0302h: call a real-mode procedure, which unlike 0300h means actually running
     // guest code and coming back afterwards. The state to restore lives here until the
-    // procedure returns to kOffRmRet.
-    struct RmCall { Cpu::State saved; uint32_t frame; };
+    // procedure returns to kOffRmRet. `unwind` records that the call arrived through the
+    // host's default interrupt handler, whose IRET is then still owed once the procedure
+    // returns — see pm_int_default().
+    struct RmCall { Cpu::State saved; uint32_t frame; bool unwind; bool wide; bool iret; };
     RmCall rm_[4];
     int rm_depth_ = 0;
+    // Set by rm_call() when it has handed the CPU to real-mode code instead of returning a
+    // result. A host routine that transfers control must not have its caller adjust the
+    // machine state afterwards; this is how the caller finds out.
+    bool rm_transferred_ = false;
     void rm_call(bool iret_frame);
     void rm_return();
+    void unwind_int_frame(bool wide);
     void load_frame(uint32_t f);
     void store_frame(uint32_t f);
+    void store_frame(uint32_t f, uint16_t flags);
 
     void switch_to_pm();
     void raw_switch(bool to_pm);
