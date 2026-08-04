@@ -3,12 +3,10 @@
 Working notes for picking the project back up. The README says what the emulator
 *is*; this says what works, what's next, and what was learned.
 
-> **⚠️ Active WIP is on branch `wip-pmode-dpmi`.** The protected-mode/DPMI CPU
-> groundwork is written there but currently **breaks the LSI C regression** (the CF
-> pass crashes). `main` is the last regression-green state (80386 real-mode core).
-> To continue: `git checkout wip-pmode-dpmi` and read *its* resume.md — it has the
-> precise crash diagnosis (CF dies at ~insn 640, `E8` at `3010:0321` → zeroed
-> `3010:9708`), the CF-gated `dbg` trace recipe, and the prime suspects to check.
+> **All work is on `main` again.** `wip-pmode-dpmi` was merged once its LSI C
+> regression was fixed (see "The regression, and what it actually was" below);
+> the protected-mode groundwork is now in `main` and regression-green. Next up is
+> the DPMI host — the numbered TODO at the end.
 
 ## State (all verified, on the browser build too)
 
@@ -67,11 +65,11 @@ all the way through their real-mode setup and stop exactly at the DPMI check —
 DJGPP prints `no DPMI - Get csdpmi*b.zip`, DOS/4GW prints `Can't run DOS/4G(W)`.
 The old `0x66` fault is gone. So the CPU is ready; what's missing is the mode switch.
 
-### DONE — protected-mode groundwork (branch `wip-pmode-dpmi`, regression fixed)
+### DONE — protected-mode groundwork (merged to `main`, regression-clean)
 
 The protected-mode CPU groundwork is in and the LSI C regression that parked it is
 **fixed** (see below). All three headless tests and the native compile-and-run pass.
-What the branch changes (src/cpu.h, src/cpu.cpp, src/memory.h only):
+It touches src/cpu.h, src/cpu.cpp and src/memory.h only:
 
 - **Memory → 16 MiB** (`memory.h`): `kSize=0x1000000`, `kMask`; low 1 MiB is real
   mode, above is extended (protected-mode linear). `phys()` still masks real mode to
