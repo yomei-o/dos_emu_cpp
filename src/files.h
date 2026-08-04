@@ -21,6 +21,13 @@ public:
     int  close(int handle);
     int  read(int handle, uint8_t* dst, int len);         // bytes read, or negative error
     int  write(int handle, const uint8_t* src, int len);  // bytes written, or negative error
+    // A write of zero bytes truncates the file at the current position — DOS has no other
+    // way to shorten a file, so this is the idiom every program uses, and it is how Watcom's
+    // wcc finishes rewriting an object file it opened read/write. Without it the tail of
+    // whatever was there before survives: a 32-bit object left in place by an earlier
+    // wpp386 run made wlink report `E3146: HELLO.obj is an invalid object file` about an
+    // object wcc had just written correctly.
+    int  truncate_here(int handle);                       // 0, or a negative error
     long seek(int handle, long offset, int whence);        // new position, or negative error
     int  remove(const std::string& dos_path);
     bool exists(const std::string& dos_path);

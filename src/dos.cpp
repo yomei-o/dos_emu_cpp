@@ -823,6 +823,17 @@ bool Dos::int21() {
                                                                     // filename chars etc.) instead of our blank.
         case 0x71:                                                  // Windows long-filename API: not supported
             cpu_.r[AX] = 0x7100; cpu_.flags |= CF; return true;     // the standard "no LFN" answer
+        case 0x5D:                                                  // server/network functions, and 5D06h:
+            // "get address of the swappable data area". DJGPP's fstat asks for the SDA to
+            // read a file's open mode out of DOS's internals. There is no SDA here and
+            // inventing one would be the FreeCOM mistake again, so say so honestly: every
+            // caller that asks has a fallback, and DJGPP's is the ordinary DOS calls.
+            cpu_.r[AX] = 1; cpu_.flags |= CF; return true;          // invalid function
+        case 0x66:                                                  // get/set global code page
+            // wlink's exit path asks. We have one code page and no way to change it, and a
+            // program that is told "unsupported" carries on; one that is told "success" and
+            // handed a zero would believe the code page is 0.
+            cpu_.r[AX] = 1; cpu_.flags |= CF; return true;          // invalid function
         case 0x33: cpu_.sb(DX, 0); cpu_.flags &= ~CF; return true;  // get/set Ctrl-Break flag -> off
         case 0x3B:                                                  // chdir (DS:DX)
             if (files_.chdir(read_asciiz(cpu_.sreg[DS], cpu_.r[DX]))) cpu_.flags &= ~CF;
@@ -961,6 +972,12 @@ bool Dos::int21() {
         case 0x40: {                                                // write (BX handle, CX bytes, DS:DX buf)
             uint16_t h = cpu_.r[BX], cnt = cpu_.r[CX], seg = cpu_.sreg[DS], off = cpu_.r[DX];
             int cfd;
+            if (!cnt) {                                             // CX=0 truncates at the
+                int r = files_.truncate_here(h);                    // current position: DOS
+                if (r < 0) { cpu_.flags |= CF; cpu_.r[AX] = -r; }   // has no other way to
+                else { cpu_.flags &= ~CF; cpu_.r[AX] = 0; }         // shorten a file
+                return true;
+            }
             if (files_.is_console(h, cfd)) {
                 for (uint16_t i = 0; i < cnt; ++i) out(cfd == 2 ? 2 : 1, static_cast<char>(mem_.rb(seg, off + i)));
                 cpu_.r[AX] = cnt; cpu_.flags &= ~CF; return true;

@@ -2,6 +2,11 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#ifdef _WIN32
+#include <io.h>          // _chsize, for the zero-length write that truncates
+#else
+#include <unistd.h>      // ftruncate
+#endif
 
 namespace fs = std::filesystem;
 
@@ -133,6 +138,24 @@ int DosFiles::write(int handle, const uint8_t* src, int len) {
     if (it == h_.end() || !it->second.used) return -kInvalidHandle;
     if (it->second.console) return len;   // routed by the DOS layer
     return static_cast<int>(std::fwrite(src, 1, len, it->second.fp));
+}
+
+int DosFiles::truncate_here(int handle) {
+    auto it = h_.find(handle);
+    if (it == h_.end() || !it->second.used) return -kInvalidHandle;
+    if (it->second.console) return 0;                  // nothing to truncate
+    std::FILE* fp = it->second.fp;
+    const long pos = std::ftell(fp);
+    if (pos < 0) return -kInvalidHandle;
+    std::fflush(fp);
+    // No portable stdio call shortens a file, so go through the platform's.
+#ifdef _WIN32
+    if (_chsize(_fileno(fp), pos) != 0) return -kAccessDenied;
+#else
+    if (::ftruncate(fileno(fp), pos) != 0) return -kAccessDenied;
+#endif
+    std::fseek(fp, pos, SEEK_SET);                      // the position is unchanged by it
+    return 0;
 }
 
 long DosFiles::seek(int handle, long offset, int whence) {

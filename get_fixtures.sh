@@ -129,6 +129,24 @@ if [ "$1" = "ow" ]; then
         tar xzf web/watcom.tar.gz -C ow ./lib286/dos 2>/dev/null || true
         echo "   16-bit libraries from web/watcom.tar.gz, so C++ links too"
     fi
+    # A DOS/4G stub for the *output* of a 32-bit link. wlink wants `wstub.exe`, which none of
+    # the component zips ship; without it the .EXE it writes says "this is a DOS/4G
+    # executable" and stops. But every 11.0c binary that is itself DOS/4GW-linked carries
+    # exactly that stub as its MZ image, so take it from wlink.exe: same release, same file,
+    # nothing invented. (OpenWatcom v2's own wstub.exe is 512 bytes and loads a different
+    # extender; it links fine and then does not run.)
+    len=$(od -A n -t u2 -j 2 -N 4 ow/binw/wlink.exe | awk '{ n = $2 * 512; if ($1) n = n - 512 + $1; print n }')
+    dd if=ow/binw/wlink.exe of=ow/binw/wstub.exe bs=1 count="$len" status=none 2>/dev/null
+    echo "   wstub.exe ($len bytes) carved from wlink.exe's own MZ stub"
+    # The 32-bit libraries, if the OpenWatcom v2 installer is around: `math387r.lib` is in
+    # none of the component zips, so `system dos4g` cannot resolve __grab_fpe_ without it.
+    for c in upstream/ow-dos.exe ow/ow-dos.exe; do
+        [ -f "$c" ] || continue
+        unzip -oqj "$c" 'lib386/dos/clib3r.lib' 'lib386/dos/plib3r.lib' 'lib386/math387r.lib' \
+                        'lib386/dos/emu387.lib' -d ow/lib386/dos
+        echo "   32-bit libraries from $c, so 'system dos4g' links too"
+        break
+    done
     echo "   ow/: $(du -sh ow | cut -f1) -- provenance and licences in upstream/README.md"
 
     crlf ow/hello.c <<'WCEOF'
@@ -176,9 +194,14 @@ and the whole way through, compiler + linker + the program it builds:
   ./dosemu --root ow ow/binw/wlink.exe "system dos file hello.obj name hello.exe"
   ./dosemu --root ow hello.exe                      # hello from Watcom C, sum=55
 
-A 32-bit link (`system dos4g` on a wcc386 object) gets as far as "creating a DOS/4G
-executable" and then stops on `__grab_fpe_`, which lives in math387r.lib -- a package
-this fixture set does not include. That is a missing library, not a linker problem.
+and 32-bit, if the OpenWatcom v2 installer was found (see web/WATCOM-LICENSE.md):
+
+  ./dosemu --root ow ow/binw/wcc386.exe hello.c
+  ./dosemu --root ow ow/binw/wlink.exe "system dos4g file hello.obj name hello.exe"
+  ./dosemu --root ow hello.exe          # DOS/4GW banner, then hello from Watcom C, sum=55
+
+Do not leave a 32-bit .obj lying around under the name a 16-bit compile will write; the
+compilers open an existing object read/write rather than recreating it.
 WEOF
     exit 0
 fi

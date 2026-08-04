@@ -267,11 +267,20 @@ void Dpmi::load_frame(uint32_t f) {
     // boundary, the two are the same address said two ways, so say it the way real mode
     // needs. Anything else is passed through untouched: a base above 1 MiB has no
     // paragraph, and inventing one would be worse than the call failing.
+    // The descriptor has to be **present**, and that is the whole difference between this
+    // working and quietly destroying the frame. `desc_ok()` deliberately accepts an empty
+    // LDT slot — that is how a client finds a free one — so without the present bit any
+    // paragraph with bit 2 set that happens to index an unused slot reads back as base 0
+    // and gets "converted" to segment 0. DOS/4GW puts the paragraph 0x018F in the frame,
+    // exactly as the spec says it should; 0x018F & 4 is set, slot 49 was empty, and its
+    // error message came out of address 0x0E18 instead of 0x18F0 + 0x0E18. A number that
+    // does not name a live descriptor is not a selector.
     auto as_paragraph = [&](uint16_t v) -> uint16_t {
         if (!(v & 4) || !cpu_.desc_ok(v)) return v;          // not an LDT selector
-        const uint32_t base = cpu_.read_desc(v).base;
-        if (base >= 0x100000 || (base & 0xF)) return v;
-        return static_cast<uint16_t>(base >> 4);
+        const Cpu::Desc d = cpu_.read_desc(v);
+        if (!d.present) return v;                            // an empty slot is not a selector
+        if (d.base >= 0x100000 || (d.base & 0xF)) return v;
+        return static_cast<uint16_t>(d.base >> 4);
     };
     cpu_.set_seg(ES, as_paragraph(mem_.r16(f + 0x22)));
     cpu_.set_seg(DS, as_paragraph(mem_.r16(f + 0x24)));
@@ -346,10 +355,12 @@ void Dpmi::rm_call(bool iret_frame) {
     cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kEntrySeg);
     cpu_.r[SP] -= 2; mem_.ww(cpu_.sreg[SS], cpu_.r[SP], kOffRmRet);
 
-    if (trace) std::fprintf(stderr, "[dpmi]%llu real-mode call %04X:%04X (%s frame) ax=%04X ds=%04X(%08X) dx=%04X\n",
+    if (trace) std::fprintf(stderr, "[dpmi]%llu real-mode call %04X:%04X (%s frame) ax=%04X ds=%04X(%08X)"
+                      " edx=%08X  frame ds=%04X es=%04X ebx=%08X\n",
                       static_cast<unsigned long long>(cpu_.insns), target_cs, target_ip,
                       iret_frame ? "iret" : "retf",
-                      cpu_.r[AX], cpu_.sreg[DS], cpu_.sbase[DS], cpu_.r[DX]);
+                      cpu_.r[AX], cpu_.sreg[DS], cpu_.sbase[DS], cpu_.gd(DX),
+                      mem_.r16(f + 0x24), mem_.r16(f + 0x22), mem_.r32(f + 0x10));
     cpu_.set_seg(CS, target_cs);
     cpu_.jump(target_ip);
     rm_transferred_ = true;   // the CPU is the procedure's now; nobody may unwind over it

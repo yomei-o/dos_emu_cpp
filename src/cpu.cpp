@@ -678,7 +678,15 @@ void Cpu::step() {
                     }
                     case 0xA4: wrdst(rdsrc()); addSI(delta); addDI(delta); break;                                    // MOVS
                     case 0xAA: wrdst(grw(AX)); addDI(delta); break;                                                  // STOS
-                    case 0xAC: srw(AX, rdsrc()); addSI(delta); break;                                                // LODS
+                    // LODS. The byte form loads AL and must leave AH alone: srw() writes the
+                    // whole of AX, which zeroed it. Nothing had noticed, because the idiom
+                    // that catches it is counting in AH across a `lodsb` copy loop — which
+                    // is exactly how OpenWatcom v2's DOS/4G stub measures a PATH element
+                    // before deciding whether to append a `\`. With the count destroyed it
+                    // appended nothing and searched for `A:\BINWDOS4GW.EXE`.
+                    case 0xAC: { uint32_t v = rdsrc();
+                        if (word) srw(AX, v); else sb(AX, static_cast<uint8_t>(v));
+                        addSI(delta); break; }
                     case 0xA6: { uint32_t s = rdsrc(), t = rddst(); if (word) aluv(7, s, t); else alu8(7, s, t); addSI(delta); addDI(delta); break; }  // CMPS
                     case 0xAE: { uint32_t t = rddst(); if (word) aluv(7, grw(AX), t); else alu8(7, gb(AX), t); addDI(delta); break; }                  // SCAS
                 }

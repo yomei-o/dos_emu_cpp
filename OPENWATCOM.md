@@ -1,9 +1,10 @@
 # OpenWatcom — where it stands
 
-The third toolchain, and it now goes the whole way. **The compilers work** — `wcc386`
-(32-bit C), `wcc` (16-bit C), `wpp`/`wpp386` (C++) — **and so does the linker**: `wlink`
-runs under DOS/4GW as a client of the built-in DPMI host and writes a DOS `.EXE` that then
-runs. `wcl`, the driver, does compile and link in one command.
+The third toolchain, and it now goes the whole way, 16- and 32-bit. **The compilers work** —
+`wcc`/`wcc386` (C), `wpp`/`wpp386` (C++) — **and so does the linker**: `wlink` runs under
+DOS/4GW as a client of the built-in DPMI host and writes a DOS `.EXE` that then runs, either
+a plain 16-bit one (`system dos`) or a 32-bit protected-mode one (`system dos4g`, which then
+loads DOS/4GW itself). `wcl`, the driver, does compile and link in one command.
 
     sh get_fixtures.sh ow
     ./dosemu --root ow ow/binw/wcc386.exe hello.c     # -> hello.obj, "Code size: 44"
@@ -399,17 +400,61 @@ the driver, and all three are about EXEC rather than DPMI:
   largest free block instead, so it lands under the child and the arena's low end stays
   whole.
 
-**What is left.** Nothing blocking, and two things worth knowing:
+### And 32-bit: `system dos4g` links, and what it builds runs
 
-- A **32-bit** link (`system dos4g` on a `wcc386` object) reaches "creating a DOS/4G
-  executable" and stops at `__grab_fpe_`, which lives in `math387r.lib` — a package the
-  w11.0c component zips do not ship. A missing library, not a linker problem. The 16-bit
-  path is complete, which is what `web/watcom.tar.gz` carries.
-- **OpenWatcom v2's own DOS binaries still do not run.** Their DOS/4G stub builds its PATH
-  search without a separator (`A:\BINWDOS4GW.EXE`) and gives up; 11.0c's stub, in the same
-  environment, builds `A:\BINW\dos4gw.exe` correctly. Since the v2 *libraries* are what the
-  C++ link needs (`web/WATCOM-LICENSE.md` explains why), it is worth finding out what the
-  v2 stub reads that we answer differently.
+Two things were in the way, neither of them the linker.
+
+**`math387r.lib`.** `system dos4g` could not resolve `__grab_fpe_`, which lives in a
+package the w11.0c component zips do not ship. It is in the OpenWatcom v2 installer, along
+with `clib3r.lib` and `plib3r.lib`, so `get_fixtures.sh ow` takes all three from there when
+it is present — the same arrangement, and for the same reason, as the 16-bit libraries.
+
+**A stub for the output.** With the libraries in place the link succeeded and the `.EXE`
+said `this is a DOS/4G executable` and stopped: that is wlink's built-in fallback stub,
+which exists only to tell you the real one is missing. wlink wants `wstub.exe`, and there
+is no `wstub.exe` in any of the eleven zips. But every 11.0c binary that is itself
+DOS/4GW-linked carries exactly that stub as its MZ image — so `get_fixtures.sh` carves it
+out of `wlink.exe`, using the MZ header's own page count. Same release, same bytes, nothing
+invented. (OpenWatcom v2's `wstub.exe` is 512 bytes and loads a different extender: it links
+without complaint and then does not run, which is a good demonstration of why the fallback
+stub's honest refusal is better than a stub that half works.)
+
+    ./dosemu --root ow ow/binw/wcc386.exe hello.c
+    ./dosemu --root ow ow/binw/wlink.exe "system dos4g file hello.obj name hello.exe"
+    ./dosemu --root ow hello.exe
+
+    DOS/4GW Protected Mode Run-time  Version 1.97
+    Copyright (c) Rational Systems, Inc. 1990-1994
+    hello from Watcom C, sum=55
+
+C++ too, through `wpp386` and `plib3r.lib`. So a 32-bit protected-mode program, compiled
+*and linked* inside the emulator by the Watcom tools, running under DOS/4GW, which is
+itself running as a client of the built-in DPMI host.
+
+### Three more emulator bugs, found by the last items on the list
+
+- **`LODSB` was clobbering `AH`.** The byte form loads AL and must leave AH alone; ours
+  wrote the whole of AX. Nothing had noticed in four toolchains, because the idiom that
+  catches it is counting in AH across a `lodsb` copy loop — which is exactly how
+  OpenWatcom v2's DOS/4G stub measures a PATH element before deciding whether to append a
+  `\`. With the count destroyed it appended nothing and searched for `A:\BINWDOS4GW.EXE`,
+  which is what "v2's binaries do not run here" turned out to be. (They get further now,
+  and then fail inside DOS/4GW on a v2-stubbed image — a separate question, not pursued.)
+- **A number that does not name a live descriptor is not a selector.** `load_frame()`'s
+  `as_paragraph()` converts a selector a client put in the frame's segment field into the
+  paragraph it covers — DOS/4GW does that for the DS of a write. But it accepted any value
+  with bit 2 set whose LDT slot was in range, and an *empty* slot reads back as base 0. So
+  the paragraph `0x018F`, which DOS/4GW puts there exactly as the spec says it should,
+  became segment 0, and its error message came out of linear `0x0E18` instead of
+  `0x18F0 + 0x0E18`. **This is what the garbled `DOS/16M error: ...` was all along** — the
+  thing two earlier sessions chased through DS. The descriptor now has to be present.
+- **`INT 21h AH=40h` with `CX=0` truncates the file at the current position.** DOS has no
+  other way to shorten a file, so it is the idiom every program uses; ours returned success
+  and did nothing. Watcom's compilers open an existing object read/write rather than
+  recreating it, so a 32-bit `.obj` left behind by an earlier `wpp386` run kept its tail
+  past the end of the 16-bit object `wcc` had just written, and wlink reported
+  `E3146: HELLO.obj is an invalid object file` about a file that was correct as far as it
+  went.
 
 Writing the OMF linker ourselves — the alternative this file used to recommend — is no
 longer necessary, though `src/coff_loader.cpp` is still the model if anyone wants to.

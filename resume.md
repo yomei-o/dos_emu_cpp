@@ -49,26 +49,39 @@ Working notes for picking the project back up. The README says what the emulator
 >   whenever a run died before the buffer flushed; correlating it with `DOSEMU_DOS_TRACE`
 >   is how both linker bugs were found.
 >
+> **The four items the last note left are all done, and three were emulator bugs after
+> all** (`OPENWATCOM.md` has each in full):
+>
+> 1. **`LODSB` was clobbering `AH`.** The byte form loads AL and must leave AH alone. This
+>    *was* "OpenWatcom v2's binaries do not run": its DOS/4G stub counts a PATH element's
+>    length in AH across a `lodsb` copy loop, and with the count destroyed it never appended
+>    the `\` — hence `A:\BINWDOS4GW.EXE`. Four toolchains had not caught it.
+> 2. **A number that does not name a *live* descriptor is not a selector.** `load_frame()`
+>    accepted any value with bit 2 set whose LDT slot was in range, and an empty slot reads
+>    back as base 0 — so the paragraph `0x018F` that DOS/4GW correctly puts in the frame
+>    became segment 0. **This is what the garbled `DOS/16M error: ...` was**, the thing two
+>    sessions chased through DS. The descriptor now has to be present.
+> 3. **`INT 21h AH=40h` with `CX=0` truncates the file at the current position** — the only
+>    way DOS can shorten a file. Ours returned success and did nothing, so a stale tail
+>    survived when Watcom's compilers rewrote an object they had opened read/write. That was
+>    the "8.3 case folding" item: not case at all.
+> 4. **A 32-bit link works now**, and what it builds runs: `math387r.lib` from the v2
+>    installer, plus a real stub for the output — carved out of `wlink.exe`'s own MZ image,
+>    since no `wstub.exe` ships in the component zips. `get_fixtures.sh ow` does both.
+> 5. **`AH=5Dh` and `AH=66h`** answer honestly (invalid function) instead of falling through
+>    to the "unimplemented" message. Every caller has a fallback and takes it.
+>
 > **What to pick up.** All optional:
 >
-> 1. **OpenWatcom v2's own DOS binaries do not run.** Their DOS/4G stub builds its PATH
->    search without a separator — `A:\BINWDOS4GW.EXE` — and gives up, while 11.0c's stub in
->    the same environment builds `A:\BINW\dos4gw.exe` correctly. Since the v2 *libraries*
->    are what a C++ link needs, finding out what the v2 stub reads that we answer
->    differently would remove the version mix. Reproduce by extracting `ow-dos.exe` (the v2
->    installer is an ordinary zip) and running its `wcc.exe`.
-> 2. **A 32-bit Watcom link** stops at `__grab_fpe_` in `math387r.lib`, a package
->    `upstream/` does not have. Adding `mth_d32`-equivalent zips to `upstream/` would
->    finish `system dos4g`. Not an emulator problem.
-> 3. **`INT 21h AH=5Dh` and `AH=66h`** are probed (by DJGPP's libc and wlink's exit path
->    respectively) and unimplemented. Both callers carry on, so this is noise removal, but
->    the messages are in every trace.
-> 4. **DOS 8.3 case folding.** `wpp386` writes `HELLO.obj` where `wcc` writes `hello.obj`;
->    leave both in one directory and `wlink` reads the wrong one
->    (`E3146: HELLO.obj is an invalid object file`). Only reachable by mixing two
->    compilers' output under one name, but it says the file layer's case handling is not
->    quite DOS's.
-> 5. **The x87 computes correctly** through libm and `printf("%f")` — `scratch_root/fp.c`,
+> 1. **OpenWatcom v2's binaries get further and still do not finish.** With `LODSB` fixed
+>    the stub finds `dos4gw.exe`, DOS/4GW prints its banner and loads the v2 image, then
+>    stops at a reflected `open` whose pointer is code rather than a filename. The same
+>    signature appears for a 32-bit `.EXE` linked with *v2's* 512-byte `wstub.exe`, so the
+>    suspect is that stub (a different extender's) rather than the image. 11.0c's stub is
+>    what works.
+> 2. **`INS`/`OUTS`, and the rest of the "only seen while executing data" list** in
+>    `OPENWATCOM.md`'s closing notes.
+> 3. **The x87 computes correctly** through libm and `printf("%f")` — `scratch_root/fp.c`,
 >    which `get_fixtures.sh djgpp` writes. Two fixes, both worth knowing about, in "The x87
 >    was wrong twice" below.
 
@@ -92,9 +105,10 @@ protected mode with a built-in DPMI host for DOS-extended programs.
   (nested EXECs) into a DOS `.EXE`, which then runs.
 - **FreeDOS COMMAND.COM** (FreeCOM 0.86) runs to an interactive prompt: `dir`, `ver`,
   `echo`, `type`, `cd`, `md`/`rd`, and external programs all work.
-- **Watcom C/C++ 11.0c** compiles *and links*: `wcc`/`wpp` (16-bit, under FlashTek X-32)
-  and `wcc386`/`wpp386`, then `wlink` (under DOS/4GW, a DPMI client) into a DOS `.EXE`
-  that runs. `wcl hello.c` does it in one command.
+- **Watcom C/C++ 11.0c** compiles *and links*, 16- and 32-bit: `wcc`/`wpp` and
+  `wcc386`/`wpp386` (all under FlashTek X-32), then `wlink` (under DOS/4GW, a DPMI client)
+  into a DOS `.EXE` that runs — `system dos` for a real-mode one, `system dos4g` for a
+  32-bit protected-mode one that loads DOS/4GW itself. `wcl hello.c` does it in one command.
 - **Browser demos** (`web/`, GitHub Pages): a FreeDOS prompt where each line runs as
   `COMMAND.COM /C <cmd>`, plus the DJGPP and Watcom compiler pages. Headless tests:
   `web/test_node.mjs`, `test_bundle.mjs`, `test_shell.mjs`, `test_djgpp.mjs`,

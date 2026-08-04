@@ -80,11 +80,13 @@ All three are static pages; nothing leaves the browser.
 7. ✅ **DJGPP gcc and g++** compile C and C++ to 32-bit `.EXE`s, in the browser too
 8. ✅ **Watcom C/C++ 11.0c** — `wcc`, `wcc386`, `wpp` and `wpp386` compile C and C++
    under FlashTek X-32, which the emulator runs (its own GDT/IDT, CPL 3, a TSS stack
-   switch), and **`wlink` links**, running under DOS/4GW as a DPMI client. `wcl hello.c`
-   does compile and link in one command, and the `.EXE` runs.
+   switch), and **`wlink` links**, running under DOS/4GW as a DPMI client — 16-bit
+   (`system dos`) and 32-bit protected-mode (`system dos4g`) output, both of which run.
+   `wcl hello.c` does compile and link in one command.
    [`OPENWATCOM.md`](OPENWATCOM.md) has the whole account, including the emulator bugs
-   the exercise turned up — the last two being an interrupt frame unwound over a
-   transfer of control, and a `CF` result thrown away by the very `IRET` that returned it.
+   the exercise turned up: an interrupt frame unwound over a transfer of control, a `CF`
+   result thrown away by the very `IRET` that returned it, `LODSB` clobbering `AH`, and
+   `AH=40h` with `CX=0` not truncating — which is the only way DOS can shorten a file.
 
 ## Building
 
