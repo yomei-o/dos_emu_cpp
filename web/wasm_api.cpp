@@ -80,6 +80,7 @@ int dosemu_run(const char* prog_host, const char* root, const char* cmdtail) {
     if (!load_program(file, cpu, 0x0100, tail, err, dn, 0)) { js_log(err.c_str()); return -1; }
     cpu.max_insns = 2000000000ULL;   // ~ generous for a compile; guards against a runaway freezing the page
     dos.psp_seg = 0x0100;
+    dos.init_psp(0x0100, 0x0100);   // no real parent; point at itself, as DOS does for the shell
 
     int code;
     try {

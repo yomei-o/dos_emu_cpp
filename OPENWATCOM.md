@@ -34,10 +34,28 @@ progress.
 4. it switches to protected mode — under **its own GDT**, after an `LGDT`, not through
    our DPMI host
 5. it reads 0xAD0 bytes of the LX header out of `wcc386.exe`
-6. …and then **exits 0 after five INT 21h calls, without loading the image**
+6. it loads **its own** 32-bit part (seek to 0x451, read 0x4410 bytes) and jumps to it
+7. that 32-bit code runs about **1,700 instructions**, compares some strings, finds no
+   match, returns 0 and exits — without ever opening `wcc386.exe`
 
-No output, no `.OBJ`. `CS=002B` at the end, which is a GDT selector of its own making.
-`DOSEMU_DOS_TRACE=1` shows the whole conversation; that is where to pick this up.
+No output, no `.OBJ`.
+
+**The open question is how W32RUN is supposed to learn which program to load.** The
+stub `EXEC`s it with a command tail of just `" hello.c"` and `env=0` (inherit), so the
+target is not on the command line. The instruction trace at the point it gives up
+(`DOSEMU_TRACE=11660-11702`) is byte compares followed by `xor eax,eax` and a clean
+return — it is looking something up and not finding it. Candidates, in the order worth
+trying:
+
+- the **parent's** environment, reached through `PSP:16h` → parent PSP → `PSP:2Ch`.
+  That chain now works (it did not before — see below), and the parent's environment
+  does carry `A:\BINW\WCC386.EXE` as its trailing program name.
+- a Watcom-specific environment variable the real installation sets.
+- something passed in the `EXEC` parameter block's FCB fields, which we ignore.
+
+`DOSEMU_DOS_TRACE=1` prints every call with its instruction count, and paths and EXEC
+tails in full; `DOSEMU_TRACE=lo-hi` then shows the instructions between any two of
+them. That pair is how each of the fixes below was found.
 
 ## Fixed on the way here
 
@@ -64,6 +82,17 @@ other bug on this project — a well-formed answer that was not true.
 - **`AH=63h` (DBCS lead-byte table) was refused.** An empty table is the truthful
   answer on a non-Japanese DOS, and it is an *answer* rather than an error, which is
   what the stub wants before it will start.
+- **`INT 21h` left the carry flag wherever the previous call had put it.** The handlers
+  only ever *set* CF on failure, so a call that succeeded silently inherited a stale
+  flag. Watcom's loader installs its interrupt handlers with `AH=25h` and checks CF
+  afterwards; it read the leftover and concluded the install had failed. `int21()` now
+  clears CF on entry, which is what DOS does, and failures say so explicitly.
+- **The PSP was missing the fields that describe *context* rather than arguments**:
+  `02h` (segment past the end of this program's memory, the same ceiling `AH=4Ah` now
+  reports), `16h` (**the parent's PSP** — a loader stub that has to find the program
+  that launched it walks this, and zero sent it to segment 0), and `50h` (the classic
+  `INT 21h; RETF` call gate). `Dos::init_psp()` fills them, because the loader knows
+  neither who the parent is nor where the arena ends.
 
 Also: `PATH` gained `A:\BINW`, and the environment gained `WATCOM=A:\` and
 `INCLUDE=A:\H`.

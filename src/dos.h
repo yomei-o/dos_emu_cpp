@@ -36,6 +36,12 @@ public:
     std::function<int()> input;
 
     uint16_t psp_seg = 0;   // set by the loader
+
+    // Fill in the PSP fields the loader cannot know: who the parent is, and where this
+    // program's memory block ends. Call after load_program(). A program that only ever
+    // reads its command tail never looks at these; one that has to find the program
+    // that launched it does, and Watcom's W32RUN is exactly that.
+    void init_psp(uint16_t psp, uint16_t parent);
     DosFiles& files() { return files_; }
 
     bool handle(uint8_t n);

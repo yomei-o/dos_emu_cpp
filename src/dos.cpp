@@ -49,6 +49,21 @@ static constexpr uint16_t kFixedTime = (12 << 11);
 
 bool load_program(const std::vector<uint8_t>&, Cpu&, uint16_t, const std::string&, std::string&, const std::string&, uint16_t);
 
+// The PSP fields that depend on who launched the program and how much memory it owns.
+// build_psp() in the loader cannot fill these: it knows neither.
+//
+//   0x02  segment just past this program's memory block. The same ceiling AH=4Ah
+//         reports, so the two agree about how much there is.
+//   0x16  the parent's PSP. A loader stub that has to find the program that launched
+//         it walks here; leaving it zero sends it to segment 0.
+//   0x50  the classic `INT 21h; RETF` call gate, which some runtimes far-call instead
+//         of issuing INT 21h themselves.
+void Dos::init_psp(uint16_t psp, uint16_t parent) {
+    mem_.ww(psp, 0x02, heap_end_);
+    mem_.ww(psp, 0x16, parent);
+    mem_.wb(psp, 0x50, 0xCD); mem_.wb(psp, 0x51, 0x21); mem_.wb(psp, 0x52, 0xCB);
+}
+
 void Dos::terminate(int code) {
     if (exec_depth_ > 0) { child_exited_ = true; child_code_ = code; return; }  // end the child only
     cpu_.exit_code = code;
@@ -91,6 +106,7 @@ bool Dos::exec(const std::string& name, uint16_t pb_seg, uint16_t pb_off) {
         cpu_.restore(parent); psp_seg = spsp; heap_next_ = sheap;
         cpu_.flags |= CF; cpu_.r[AX] = 2; return true;
     }
+    init_psp(child_psp, spsp);        // the child's parent is us
     psp_seg = child_psp;
 
     // Run the child to completion.
@@ -193,11 +209,27 @@ bool Dos::handle(uint8_t n) {
         case 0x21: {
             if (!trace) return int21();
             const uint16_t ax = cpu_.r[AX], bx = cpu_.r[BX], cx = cpu_.r[CX], dx = cpu_.r[DX];
+            // The calls that carry a string say far more than their registers do.
+            const uint8_t ah_ = ax >> 8;
+            if (ah_ == 0x3D || ah_ == 0x3C || ah_ == 0x41 || ah_ == 0x43 || ah_ == 0x4E ||
+                ah_ == 0x4B || ah_ == 0x60 || ah_ == 0x39 || ah_ == 0x3B || ah_ == 0x5B) {
+                std::fprintf(stderr, "[int21]   path \"%s\"", read_asciiz(cpu_.sreg[DS], dx).c_str());
+                if (ah_ == 0x4B) {                       // ...and EXEC's command tail
+                    const uint16_t co = mem_.rw(cpu_.sreg[ES], bx + 2);
+                    const uint16_t cs = mem_.rw(cpu_.sreg[ES], bx + 4);
+                    const uint8_t n = mem_.rb(cs, co);
+                    std::fprintf(stderr, "  tail(%u) \"", n);
+                    for (uint8_t i = 0; i < n && i < 90; ++i)
+                        std::fputc(mem_.rb(cs, static_cast<uint16_t>(co + 1 + i)), stderr);
+                    std::fprintf(stderr, "\"  env=%04X", mem_.rw(cpu_.sreg[ES], bx));
+                }
+                std::fputc('\n', stderr);
+            }
             const bool r = int21();
             std::fprintf(stderr,
-                "[int21] ah=%02X al=%02X bx=%04X cx=%04X dx=%04X -> %s ax=%04X bx=%04X"
+                "[int21]%llu ah=%02X al=%02X bx=%04X cx=%04X dx=%04X -> %s ax=%04X bx=%04X"
                 "  at %04X:%08X\n",
-                ax >> 8, ax & 0xFF, bx, cx, dx,
+                (unsigned long long)cpu_.insns, ax >> 8, ax & 0xFF, bx, cx, dx,
                 (cpu_.flags & CF) ? "CF" : "ok", cpu_.r[AX], cpu_.r[BX],
                 cpu_.sreg[CS], cpu_.ip);
             return r;
@@ -231,6 +263,12 @@ bool Dos::handle(uint8_t n) {
 bool Dos::int21_default(uint8_t) { return true; }   // unknown INTs: no-op for now
 
 bool Dos::int21() {
+    // DOS clears the carry flag on the way out of a call that worked, and the handlers
+    // below only ever *set* it on failure — so several of them were leaving whatever CF
+    // the previous call had left behind. Watcom's loader installs its interrupt
+    // handlers with AH=25h and checks CF afterwards; it read a stale flag and concluded
+    // the install had failed. Clear it once, here, and let a failure say so.
+    cpu_.flags &= ~CF;
     uint8_t ah = cpu_.r[AX] >> 8;
     switch (ah) {
         case 0x00: terminate(0); return true;                       // terminate
@@ -346,7 +384,7 @@ bool Dos::int21() {
             uint8_t v = cpu_.r[AX] & 0xFF;
             mem_.w16(v * 4, cpu_.r[DX]);
             mem_.w16(v * 4 + 2, cpu_.sreg[DS]);
-            return true;
+            cpu_.flags &= ~CF; return true;
         }
         case 0x30:                                                  // get DOS version: AL=major, AH=minor
             cpu_.r[AX] = (30 << 8) | 3;   // 3.30
