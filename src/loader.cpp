@@ -2,6 +2,7 @@
 // registers. .COM is a flat image loaded at PSP:0x100; .EXE (MZ) has a header, a
 // relocation table, and its own initial CS:IP / SS:SP relative to the load segment.
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include "cpu.h"
@@ -46,14 +47,18 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
     build_env(mem, dos_name);
     build_psp(mem, psp_seg, cmdline);
 
-    // A DJGPP program is a real-mode DOS stub wrapping an i386 COFF image; running it
-    // needs 32-bit protected mode + a DPMI host, which are not implemented yet. Detect
-    // it up front and say so, rather than crashing inside the stub on a 32-bit opcode.
     // A DJGPP program is a real-mode DOS stub (go32) wrapping an i386 COFF image; an
     // OpenWatcom DOS program is the same idea with a DOS/4GW stub wrapping an LE image.
-    // The 386 real-mode core now runs both stubs all the way to their DPMI check — the
-    // next milestone is the protected-mode switch + a built-in DPMI host (see resume.md).
-    if (is_djgpp_coff(f)) {
+    // Running either needs 32-bit protected mode + a DPMI host, which is the next
+    // milestone (see resume.md), so refuse up front with an explanation instead of
+    // dying somewhere inside the stub.
+    //
+    // DOSEMU_RUNSTUB=1 skips this refusal and lets the stub run. That is the probe used
+    // to check the 386 real-mode core against real extender code: the stub should get
+    // all the way to its DPMI test and say so — `no DPMI - Get csdpmi*b.zip` for go32,
+    // `Can't run DOS/4G(W)` for DOS/4GW. Anything earlier is a CPU bug, and this is the
+    // only 32-bit-heavy code available to catch one before the DPMI host exists.
+    if (is_djgpp_coff(f) && !getenv("DOSEMU_RUNSTUB")) {
         err = "DJGPP 32-bit program (i386 COFF): the go32 stub runs but needs the "
               "protected-mode + DPMI host, which is the next milestone (see resume.md). "
               "The 16-bit DOS side works.";

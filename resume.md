@@ -116,11 +116,31 @@ Verified: `LCC.EXE PROG.C` → `PROG.exe` → `sum=55`; `node web/test_shell.mjs
 (SHELL DEMO OK), `web/test_bundle.mjs` (BUNDLE OK), `web/test_node.mjs` (DOS + LSI C
 IN WASM OK) after rebuilding `web/dosemu.js`.
 
-**Fixture note for a fresh clone:** `lsic/`, `scratch_root/` and `fdos/` are gitignored
-and absent, but `web/lsic.tar.gz` **is committed** and contains the whole LSI C tree
-plus `COMMAND.COM`. So: `mkdir -p scratch_root && tar xzf web/lsic.tar.gz -C scratch_root`
-and `cp -r scratch_root/LSIC86 lsic` reconstitutes everything the tests need — no LZH
-extractor required.
+**Fixtures on a fresh clone: `sh get_fixtures.sh [djgpp]`.** `lsic/`, `scratch_root/`
+and `djgpp/` are all gitignored, and `lsic330c.lzh` in the repo root needs an LZH
+extractor most machines lack. But `web/lsic.tar.gz` **is committed** and holds the whole
+LSI C tree plus `COMMAND.COM`, so the script reconstitutes everything from it with no
+network and no extractor; the optional `djgpp` argument additionally downloads
+`djdev205.zip`. It also writes `scratch_root/PROG.C` rather than committing it — the file
+needs CRLF endings *and* a literal `\n` in the source, and getting that wrong yields
+`missing "` from the LSI C front end instead of anything informative.
+
+**`DOSEMU_RUNSTUB=1` runs a DJGPP/DOS-4GW stub instead of refusing it** (`loader.cpp`).
+This is the only 32-bit-heavy code available to test the CPU against before the DPMI host
+exists, so it is now a documented switch rather than a temporary source edit. Expected
+output today — anything *earlier* than these is a CPU bug:
+
+    DOSEMU_RUNSTUB=1 ./dosemu --root scratch_root scratch_root/DJECHO.EXE
+    -> no DPMI - Get csdpmi*b.zip
+
+**The DJGPP fixture** (`djgpp/bin/djecho.exe` from djdev205, 97792 bytes) parses with
+`src/coff_loader.cpp` as: entry `0x18B0`, text base `0x18A8`, and
+
+    .text  vaddr 0x000018A8  size 0x012358  raw 0x0010A8
+    .data  vaddr 0x00013C00  size 0x004200  raw 0x013400
+    .bss   vaddr 0x00017E00  size 0x003600  raw 0
+
+so step 4 below (map .text/.data, zero .bss) has concrete numbers to check against.
 
 Scratch fixtures (gitignored): `scratch_root/` = a drive with `LSIC86/`, `PROG.C`,
 `COMMAND.COM`; build with `cc.sh ... -Fe:dosemu.exe`; run
@@ -156,6 +176,9 @@ FreeCOM's full `wmake` build. Keep LSI C + FreeCOM green throughout (`node
 web/test_shell.mjs`, native `LCC.EXE PROG.C`).
 
 ## Practical notes
+
+- **Fixtures first on a fresh clone:** `sh get_fixtures.sh djgpp` (see above). Nothing
+  runs without it.
 
 - Build (MSVC, no vcvars): `cc.sh -std:c++17 -O2 -EHsc -utf-8 -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS -Isrc src/*.cpp`.
   WASM: `EMCC=$(which emcc) sh web/build.sh` (rebuild + recommit `web/dosemu.js` after any `src/` change).
