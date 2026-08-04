@@ -352,8 +352,8 @@ bool Dpmi::int31() {
     }
 
     if (trace)
-        printf("[dpmi] int31 AX=%04X BX=%04X CX=%04X DX=%04X -> %s AX=%04X\n",
-               fn, cpu_.r[BX], cpu_.r[CX], cpu_.r[DX],
+        printf("[dpmi]%llu int31 AX=%04X BX=%04X CX=%04X DX=%04X -> %s AX=%04X\n",
+               (unsigned long long)cpu_.insns, fn, cpu_.r[BX], cpu_.r[CX], cpu_.r[DX],
                cpu_.get_flag(CF) ? "FAIL" : "ok", cpu_.r[AX]);
     return true;
 }

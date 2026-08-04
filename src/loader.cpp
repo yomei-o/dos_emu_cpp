@@ -65,6 +65,21 @@ bool load_program(const std::vector<uint8_t>& f, Cpu& cpu, uint16_t psp_seg,
     Memory& mem = cpu.mem();
     uint16_t load_seg = psp_seg + 0x10;   // program starts 256 bytes (one PSP) above
 
+    // Clear the upper halves of the 32-bit registers. A freshly loaded program gets
+    // 16-bit registers from DOS and nothing defines EAX..EDI above bit 15, so leaving
+    // the previous program's values there is a leak — and an invisible one, because no
+    // 16-bit code can observe it.
+    //
+    // It stops being invisible the moment the child is a DOS extender. EXEC set r[SP]
+    // and left rhi[SP] holding the *parent's* ESP high half, so a DJGPP child started
+    // life with SP=0x0760 but ESP=0x00200760. Its 16-bit stack segment meant PUSH used
+    // SP while `mov ecx,[esp+4]` addressed through the full ESP — a read 2 MiB away
+    // from the write. sbrk() read its own argument as garbage, asked DPMI for 2.1 GB,
+    // was refused, and the whole child tore itself down. gcc's driver hung waiting for
+    // a cc1 that had already given up; the same cc1 run directly was fine, because
+    // nothing had run before it to leave anything in rhi[].
+    for (int i = 0; i < 8; ++i) cpu.rhi[i] = 0;
+
     // A child launched through EXEC names its own environment block in the parameter
     // block, and it matters: DJGPP passes command lines longer than the PSP's 126-byte
     // tail by putting them in an environment variable and sending " !proxy" as the

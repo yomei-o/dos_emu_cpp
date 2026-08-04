@@ -213,6 +213,12 @@ public:
     // pointer tells the two apart in seconds and points straight at the loop.
     static uint64_t sample_every;
     uint64_t sample_left = 0;
+    // DOSEMU_TRACE=lo-hi (decimal instruction counts) prints every instruction in that
+    // window with the register file. Sampling says *where* a guest is; this says what
+    // it is computing, which is what you need once the suspect range is a few hundred
+    // instructions wide.
+    static uint64_t trace_lo, trace_hi;
+    void trace_insn(uint8_t op) const;
 
     // ---- x87 ----------------------------------------------------------------
     // A register stack of eight doubles. Real hardware keeps 80-bit extended values;

@@ -21,11 +21,23 @@ bool Cpu::fpu_trace = getenv("DOSEMU_FPU_TRACE") != nullptr;
 uint64_t Cpu::sample_every = [] { const char* s = getenv("DOSEMU_SAMPLE");
     return s ? strtoull(s, nullptr, 10) : 0ull; }();
 
+uint64_t Cpu::trace_lo = [] { const char* s = getenv("DOSEMU_TRACE");
+    return s ? strtoull(s, nullptr, 10) : 0ull; }();
+uint64_t Cpu::trace_hi = [] { const char* s = getenv("DOSEMU_TRACE");
+    const char* d = s ? strchr(s, '-') : nullptr;
+    return d ? strtoull(d + 1, nullptr, 10) : 0ull; }();
+
 uint32_t Cpu::watch_lo = [] { const char* s = getenv("DOSEMU_WATCH");
     return s ? (uint32_t)strtoul(s, nullptr, 16) : 0u; }();
 uint32_t Cpu::watch_hi = [] { const char* s = getenv("DOSEMU_WATCH");
     const char* d = s ? strchr(s, '-') : nullptr;
     return d ? (uint32_t)strtoul(d + 1, nullptr, 16) : 0u; }();
+
+void Cpu::trace_insn(uint8_t op) const {
+    printf("[t]%llu %04X:%08X %02X  eax=%08X ecx=%08X  esp=%08X(sp=%04X ss=%04X d=%d) ebp=%08X\n",
+           (unsigned long long)insns, sreg[CS], ip - 1, op,
+           gd(AX), gd(CX), gd(SP), r[SP], sreg[SS], ss_d ? 1 : 0, gd(BP));
+}
 
 void Cpu::watch_hit(uint32_t a, int s, uint32_t off) const {
     printf("[watch] %08X  seg%d=%04X base=%08X off=%08X  at %04X:%08X\n",
@@ -120,6 +132,7 @@ void Cpu::step() {
     bool o32 = d.o32 ^ cs_d;
     bool a32 = d.a32 ^ cs_d;
     ++ophist[op];
+    if (trace_hi && insns >= trace_lo && insns <= trace_hi) trace_insn(op);
 
     // ---- ModRM decode (16- or 32-bit addressing) ----
     auto decode_modrm = [&](Modrm& m) {
