@@ -96,6 +96,12 @@ sh build.sh          # or: g++ -std=c++17 -O2 -Isrc -o dosemu src/*.cpp
 ./dosemu PROG.EXE [args...]
 ```
 
+## Tools
+
+`tools/fat12x.py` and `tools/fat12x.cpp` (same behavior, pick your runtime) extract
+every file from a FAT12 floppy image — which is how the compiler disks the emulator
+gets tested against are unpacked. `fat12x DISK01.IMG outdir`, once per disk.
+
 ## License
 
 Own code MIT. `lsic330c.lzh` is the LSI C-86 trial package, redistributed under its
