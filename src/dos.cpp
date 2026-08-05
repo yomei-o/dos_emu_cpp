@@ -615,6 +615,19 @@ bool Dos::handle(uint8_t n) {
     // host's default handler; either way, going straight to the DOS layer would skip
     // work the client is relying on.
     if (cpu_.pe() && dpmi_.pm_int(n)) return true;
+    // The same courtesy in real mode: a vector the guest re-pointed (AH=25h or a
+    // direct IVT write) is the guest's own handler, and the CPU must dispatch through
+    // the table exactly as hardware would. Turbo C++'s TCC is a VROOMM-overlaid
+    // program — every inter-overlay call is `INT 3Fh` into the manager it installed,
+    // and servicing that as a no-op falls through into the stub's *data*. The default
+    // stubs at 0050:n*4 re-enter `INT n`, so when one of those is what is executing
+    // (a handler chaining to the saved vector lands there), fall through to the
+    // built-in layer instead of going around the table for ever. Returning false
+    // hands the INT to the CPU's own IVT dispatch.
+    if (!cpu_.pe() && cpu_.sreg[CS] != kIvtStubSeg) {
+        const uint16_t vo = mem_.r16(n * 4), vs = mem_.r16(n * 4 + 2);
+        if ((vs || vo) && (vs != kIvtStubSeg || vo != n * 4)) return false;
+    }
     SegAlias ads(cpu_, DS, n != 0x31), aes(cpu_, ES, n != 0x31);
     switch (n) {
         // A CPU exception, not a service call. Nothing here can handle one, but
